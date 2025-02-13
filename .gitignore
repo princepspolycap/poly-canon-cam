@@ -31,8 +31,3 @@ Thumbs.db
 # Project specific
 *.log
 EDSDK 13.18.40 Macintosh/
-analysis.txt
-framework_test.py
-sdk_test.py
-test.py
-live_view_test.py

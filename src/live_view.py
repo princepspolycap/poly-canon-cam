@@ -11,7 +11,7 @@ For the full-featured viewer, use viewer.py instead.
 
 import cv2
 import numpy as np
-from camera import CanonCamera
+from .camera import CanonCamera
 
 def main():
     """

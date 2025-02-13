@@ -85,15 +85,39 @@ class CameraApp:
         Any errors during startup are displayed in the status label.
         """
         try:
+            print("Initializing camera connection...")
             self.camera = CanonCamera()
             self.camera.connect()
-            self.camera.start_live_view()
-            self.evf_image = self.camera.create_evf_image()
+            
+            print("Connected to camera, waiting for device to stabilize...")
+            self.status_label.configure(text="Camera: Initializing...")
+            self.root.update()  # Force UI update
+            
+            # Allow camera to stabilize before starting live view
+            self.root.after(1000)  # Wait 1 second
+            
+            print("Starting live view...")
+            if not self.camera.start_live_view():
+                self.status_label.configure(text="Error: Failed to start live view")
+                if self.camera:
+                    self.camera.disconnect()
+                    self.camera = None
+                return
+            
+            print("Creating EVF image buffer...")
+            try:
+                self.evf_image = self.camera.create_evf_image()
+            except Exception as e:
+                self.status_label.configure(text=f"Error: Failed to create EVF buffer - {str(e)}")
+                if self.camera:
+                    self.camera.disconnect()
+                    self.camera = None
+                return
             
             self.is_running = True
             self.start_btn.configure(state=tk.DISABLED)
             self.stop_btn.configure(state=tk.NORMAL)
-            self.status_label.configure(text="Camera: Connected")
+            self.status_label.configure(text="Camera: Live view active")
             
             # Start frame capture thread
             self.capture_thread = threading.Thread(target=self.capture_frames)
@@ -121,18 +145,27 @@ class CameraApp:
             try:
                 image_data = self.camera.download_evf_image(self.evf_image)
                 if image_data:
-                    # Convert bytes to numpy array
-                    nparr = np.frombuffer(image_data, np.uint8)
-                    # Decode image
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        # Convert BGR to RGB
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        # Put frame in queue
-                        if not self.frame_queue.full():
-                            self.frame_queue.put(frame_rgb)
+                    try:
+                        # Convert bytes to numpy array
+                        nparr = np.frombuffer(image_data, np.uint8)
+                        # Decode image
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            # Convert BGR to RGB
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            # Put frame in queue
+                            if not self.frame_queue.full():
+                                self.frame_queue.put(frame_rgb)
+                        else:
+                            print("Failed to decode image data")
+                    except Exception as e:
+                        print(f"Frame processing error: {e}")
+                        # Don't break the capture loop for frame errors
+                        continue
             except Exception as e:
                 print(f"Capture error: {e}")
+                if not self.is_running:
+                    break
 
     def show_frame(self):
         """

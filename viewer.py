@@ -13,18 +13,12 @@ Features:
 - Informative status messages
 """
 
-import os
-import sys
 import cv2
 import numpy as np
 import time
 import ctypes
-
-# Add src directory to Python path for module imports
-src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "src"))
-sys.path.append(src_dir)
-
-from camera import CanonCamera
+import sys
+from src.camera import CanonCamera
 
 def print_instructions():
     """Print usage instructions and setup requirements."""
@@ -66,15 +60,16 @@ def main():
             print("\n✓ Camera connected successfully")
             
             # Enable live view
-            result = camera.start_live_view()
-            if result == 0:
-                print("✓ Live view started")
-            else:
+            print("\nStarting live view...")
+            if not camera.start_live_view():
                 print("\n⚠️  Live view failed to start")
                 print("Please check that:")
                 print("1. Camera is in Photo mode (not Movie mode)")
                 print("2. Live view is enabled on the camera")
+                print("3. Camera is not in use by another application")
+                print("4. Camera controls are not being accessed")
                 return
+            print("✓ Live view started")
             
             evf_image = camera.create_evf_image()
             print("✓ EVF image initialized")

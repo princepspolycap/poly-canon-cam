@@ -1,0 +1,97 @@
+Project Analysis: Canon Camera Control
+
+1. Problem Statement
+-------------------
+Initial error shows two key issues:
+a) EDSDK framework file not found where expected
+b) Python cannot load the EDSDK library
+
+2. Current System Architecture
+-----------------------------
+[Component Diagram]
+   ┌─────────────────┐         ┌──────────────┐
+   │ GUI Application │    →    │ Camera Module │
+   └─────────────────┘         └──────────────┘
+           ↓                          ↓
+   [Tkinter/OpenCV]           [Canon EDSDK Framework]
+
+3. Dependency Graph
+------------------
+GUI App → Camera Module → EDSDK Framework
+   ↓            ↓             ↓
+Tkinter     ctypes         Binary Libs
+PIL/CV2     Threading      (CHHLLite.bundle,
+                           EdsImage.bundle)
+
+4. Data Flow
+------------
+[Live View Flow]
+Camera  ⇢  Memory Stream  ⊗  OpenCV  →  Display
+  ↑          ↓              ↓           ↓
+EDSDK  →  Raw Bytes  →  NumPy Array → GUI Window
+
+5. State Transitions
+-------------------
+Camera States:
+[Disconnected] → [Connected] → [LiveView] → [Streaming]
+        ↑                                       ↓
+        └───────────────[Cleanup]──────────────┘
+
+6. Function Analysis
+-------------------
+Key Methods & Complexity:
+- CanonCamera._load_edsdk(): O(1)
+  Side effects: System library loading
+  Threading: None
+  
+- CanonCamera.start_live_view(): O(1)
+  Side effects: Camera state change
+  Threading: None
+
+- CameraApp.capture_frames(): O(∞)
+  Side effects: Memory allocation
+  Threading: Runs in separate thread
+
+7. Critical Paths & Bottlenecks
+------------------------------
+□ EDSDK Framework Loading
+  └→ System dependency path resolution
+  └→ Library permissions and access
+
+□ Live View Pipeline
+  └→ Frame capture (async)
+  └→ Memory management
+  └→ GUI update rate
+
+8. Error Analysis
+----------------
+Current error chain:
+1. chmod fails → Framework not in expected location
+2. dlopen fails → Cannot load library
+3. tkinter fails → Python environment issue
+
+9. Requirements
+--------------
+a) Framework Access:
+   - Correct file structure
+   - Proper permissions
+   - Accessible path
+
+b) Python Environment:
+   - Python 3.11+
+   - Required packages:
+     * numpy
+     * opencv-python
+     * Pillow
+     * tkinter support
+
+10. Action Plan
+--------------
+1. Verify EDSDK framework location and structure
+2. Ensure all framework components are present
+3. Set correct permissions
+4. Update Python environment
+5. Test camera connection
+6. Test GUI functionality
+
+This analysis shows we've been jumping between Python environment issues and framework issues without properly isolating the root cause. We should focus first on ensuring the EDSDK framework is properly set up before dealing with Python package dependencies.
