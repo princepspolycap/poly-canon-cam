@@ -1,3 +1,18 @@
+"""
+GUI Application Module for Poly Canon Cam
+
+This module provides a graphical user interface for controlling and viewing
+Canon camera live preview. It uses tkinter for the GUI and handles camera
+operations in a separate thread to maintain UI responsiveness.
+
+Features:
+- Live preview display with automatic resizing
+- Start/Stop camera controls
+- Status indicators
+- Clean shutdown handling
+- Thread-safe frame capture and display
+"""
+
 import tkinter as tk
 from tkinter import ttk
 import cv2
@@ -8,6 +23,19 @@ import threading
 import queue
 
 class CameraApp:
+    """
+    Main GUI application class for Canon camera control.
+    
+    This class creates a window with camera preview and control buttons.
+    It handles:
+    - Camera connection and disconnection
+    - Live preview display with proper scaling
+    - Thread-safe frame capture and display
+    - Resource cleanup on exit
+    
+    The live preview runs in a separate thread to prevent UI freezing,
+    with thread-safe communication via a queue.
+    """
     def __init__(self, root):
         self.root = root
         self.root.title("Canon Camera Viewer - Princeps Polycap Productions")
@@ -44,6 +72,18 @@ class CameraApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def start_camera(self):
+        """
+        Initialize camera connection and start live preview.
+        
+        This method:
+        1. Connects to the camera
+        2. Starts live view
+        3. Creates EVF image buffer
+        4. Launches frame capture thread
+        5. Updates UI elements
+        
+        Any errors during startup are displayed in the status label.
+        """
         try:
             self.camera = CanonCamera()
             self.camera.connect()
@@ -67,6 +107,16 @@ class CameraApp:
             self.status_label.configure(text=f"Error: {str(e)}")
 
     def capture_frames(self):
+        """
+        Continuously capture frames from the camera.
+        
+        This method runs in a separate thread and:
+        1. Downloads frames from the camera
+        2. Converts them to the correct format
+        3. Places them in the frame queue for display
+        
+        The loop continues until self.is_running is False.
+        """
         while self.is_running:
             try:
                 image_data = self.camera.download_evf_image(self.evf_image)
@@ -85,6 +135,18 @@ class CameraApp:
                 print(f"Capture error: {e}")
 
     def show_frame(self):
+        """
+        Display the most recent frame from the queue.
+        
+        This method:
+        1. Gets the latest frame from the queue
+        2. Resizes it to fit the canvas while maintaining aspect ratio
+        3. Converts it to a format tkinter can display
+        4. Updates the canvas
+        
+        This runs in the main thread and is scheduled using root.after()
+        to maintain UI responsiveness.
+        """
         try:
             if not self.frame_queue.empty():
                 frame = self.frame_queue.get()
@@ -121,6 +183,15 @@ class CameraApp:
             self.show_frame_id = self.root.after(10, self.show_frame)
 
     def stop_camera(self):
+        """
+        Stop camera preview and clean up resources.
+        
+        This method:
+        1. Stops the frame capture thread
+        2. Releases camera resources
+        3. Updates UI elements
+        4. Clears the preview canvas
+        """
         self.is_running = False
         if self.show_frame_id:
             self.root.after_cancel(self.show_frame_id)
@@ -136,10 +207,20 @@ class CameraApp:
         self.canvas.delete("all")
 
     def on_closing(self):
+        """
+        Handle window close event.
+        
+        Ensures proper cleanup of camera resources before destroying the window.
+        """
         self.stop_camera()
         self.root.destroy()
 
 def main():
+    """
+    Application entry point.
+    
+    Creates the main window and starts the tkinter event loop.
+    """
     root = tk.Tk()
     app = CameraApp(root)
     root.mainloop()

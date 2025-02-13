@@ -1,8 +1,33 @@
+"""
+Live View Module for Poly Canon Cam
+
+This module provides a simplified live view implementation for testing and development.
+It demonstrates basic camera connection and live view functionality without the additional
+features of the main viewer (like FPS counter, error recovery, etc.).
+
+This is primarily used for testing camera connectivity and basic live view operation.
+For the full-featured viewer, use viewer.py instead.
+"""
+
 import cv2
 import numpy as np
 from camera import CanonCamera
 
 def main():
+    """
+    Simple live view demonstration.
+    
+    This function:
+    1. Connects to the first available Canon camera
+    2. Starts live view
+    3. Displays the camera feed in a basic window
+    4. Cleans up resources on exit
+    
+    The preview can be stopped by pressing 'q'.
+    
+    This implementation is intentionally minimal to serve as a test bed
+    for basic camera functionality.
+    """
     try:
         # Use context manager for automatic cleanup
         with CanonCamera() as camera:
