@@ -1,8 +1,28 @@
+"""
+Canon Camera Interface Module
+
+This module provides a high-level interface to Canon cameras using the Canon EDSDK.
+It handles camera connection, live view setup, and image capture through a clean
+pythonic interface while managing EDSDK resources properly.
+
+Key Features:
+- Automatic camera detection and connection
+- Live view support with proper cleanup
+- Resource management via context manager protocol
+- Error handling and status reporting
+- UI locking for thread-safe operations
+
+Example:
+    with CanonCamera() as camera:
+        camera.start_live_view()
+        image = camera.download_evf_image(camera.create_evf_image())
+"""
+
 import ctypes
 import time
 from typing import Optional
 
-# Define important EDSDK constants
+# EDSDK Constants
 EDS_ERR_OK = 0
 kEdsPropID_Evf_OutputDevice = 0x00000500
 kEdsPropID_Evf_Mode = 0x00000501
@@ -17,10 +37,25 @@ kEdsCameraCommand_PressShutterButton = 0x00000004
 kEdsCameraCommand_UILock = 0x00000000
 kEdsCameraCommand_UIUnLock = 0x00000001
 
-# Define camera object reference type
+# Camera reference type
 EdsCameraRef = ctypes.c_void_p 
 
 class CanonCamera:
+    """
+    A high-level interface to Canon cameras using the EDSDK.
+    
+    This class provides a pythonic interface to Canon cameras, handling all the 
+    low-level EDSDK calls and resource management. It implements the context
+    manager protocol for safe resource cleanup.
+    
+    Usage:
+        with CanonCamera() as camera:
+            camera.start_live_view()
+            # Work with camera...
+    
+    The camera will be automatically disconnected and resources cleaned up when
+    exiting the context manager block.
+    """
     def __init__(self):
         self.edsdk = None
         self.camera = None
@@ -28,14 +63,26 @@ class CanonCamera:
         self._initialize_sdk()
 
     def _load_edsdk(self):
-        """Load the EDSDK library"""
+        """
+        Load the Canon EDSDK library.
+        
+        Raises:
+            RuntimeError: If the EDSDK library cannot be loaded
+        """
         try:
             self.edsdk = ctypes.CDLL("./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK")
         except Exception as e:
             raise RuntimeError(f"Failed to load EDSDK library: {e}")
 
     def _initialize_sdk(self):
-        """Initialize the SDK"""
+        """
+        Initialize the EDSDK library.
+        
+        This must be called before any other EDSDK operations.
+        
+        Raises:
+            RuntimeError: If SDK initialization fails
+        """
         if not self.edsdk:
             raise RuntimeError("EDSDK not loaded")
         
@@ -79,7 +126,17 @@ class CanonCamera:
         return camera
 
     def connect(self):
-        """Connect to the first available camera"""
+        """
+        Connect to the first available Canon camera.
+        
+        This method:
+        1. Gets a handle to the first connected camera
+        2. Opens a session with the camera
+        3. Configures basic camera settings (save location, etc.)
+        
+        Raises:
+            RuntimeError: If no camera is found or connection fails
+        """
         if self.camera:
             return
         
@@ -108,7 +165,11 @@ class CanonCamera:
         print("Successfully connected to camera!")
 
     def disconnect(self):
-        """Disconnect from the camera and clean up"""
+        """
+        Disconnect from the camera and clean up resources.
+        
+        This releases all EDSDK resources and terminates the SDK properly.
+        """
         if self.camera:
             print("Closing session...")
             self.edsdk.EdsCloseSession(self.camera)
@@ -130,7 +191,21 @@ class CanonCamera:
         self.disconnect()
 
     def start_live_view(self):
-        """Start live view on the camera following official sample"""
+        """
+        Start live view on the camera following official EDSDK sample code.
+        
+        The method:
+        1. Locks the camera UI to prevent conflicts
+        2. Gets the current output device
+        3. Adds PC as an output device
+        4. Waits for the change to take effect
+        
+        Returns:
+            int: Error code from EDSDK (0 for success)
+            
+        Raises:
+            RuntimeError: If camera is not connected or live view fails to start
+        """
         if not self.camera:
             raise RuntimeError("Camera not connected")
 
@@ -173,7 +248,17 @@ class CanonCamera:
             self.edsdk.EdsSendCommand(self.camera, kEdsCameraCommand_UIUnLock, 0)
 
     def create_evf_image(self):
-        """Create EVF image reference"""
+        """
+        Create an EVF (Electronic ViewFinder) image reference.
+        
+        This creates a memory stream for receiving live view images.
+        
+        Returns:
+            ctypes.c_void_p: Memory stream reference
+            
+        Raises:
+            RuntimeError: If memory stream creation fails
+        """
         evf_image = ctypes.c_void_p()
         err = self.edsdk.EdsCreateMemoryStream(0, ctypes.byref(evf_image))
         if err != EDS_ERR_OK:
@@ -181,7 +266,19 @@ class CanonCamera:
         return evf_image
 
     def download_evf_image(self, stream) -> Optional[bytes]:
-        """Download live view image data following official sample"""
+        """
+        Download the current live view image data.
+        
+        This downloads the current EVF frame from the camera into a memory stream,
+        following the official EDSDK sample implementation.
+        
+        Args:
+            stream: Memory stream reference from create_evf_image()
+            
+        Returns:
+            Optional[bytes]: Raw image data that can be decoded by OpenCV,
+                           or None if download fails
+        """
         if not self.camera or not stream:
             return None
 
@@ -218,6 +315,11 @@ class CanonCamera:
                 self.edsdk.EdsRelease(evf_image)
 
     def release_evf_image(self, evf_image):
-        """Release EVF image resources"""
+        """
+        Release EVF image resources.
+        
+        Args:
+            evf_image: EVF image reference to release
+        """
         if evf_image:
             self.edsdk.EdsRelease(evf_image)

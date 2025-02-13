@@ -1,3 +1,18 @@
+"""
+Poly Canon Cam - Live Preview Application
+
+This module provides a real-time live preview window for Canon cameras using the EDSDK.
+It displays the camera's live view with an FPS counter and handles camera connection,
+preview display, and cleanup.
+
+Features:
+- Real-time live view display
+- FPS monitoring and display
+- Automatic error recovery
+- Clean shutdown on exit
+- Informative status messages
+"""
+
 import os
 import sys
 import cv2
@@ -5,13 +20,14 @@ import numpy as np
 import time
 import ctypes
 
-# Add src directory to Python path
+# Add src directory to Python path for module imports
 src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "src"))
 sys.path.append(src_dir)
 
 from camera import CanonCamera
 
 def print_instructions():
+    """Print usage instructions and setup requirements."""
     print("""
 Canon Camera Live Preview
 ------------------------
@@ -24,6 +40,24 @@ For best results:
 """)
 
 def main():
+    """
+    Main application entry point.
+    
+    This function:
+    1. Initializes the camera connection
+    2. Starts live view
+    3. Creates a preview window
+    4. Continuously displays camera feed with FPS counter
+    5. Handles cleanup on exit
+    
+    The preview window can be closed by pressing 'q'.
+    
+    Error handling includes:
+    - Camera connection issues
+    - Live view activation problems
+    - Frame capture failures
+    - Connection loss detection
+    """
     print_instructions()
     print("Initializing...")
     
@@ -59,18 +93,18 @@ def main():
             while True:
                 frame_start = time.time()
                 
-                # Get preview frame
+                # Download the next frame from live view
                 image_data = camera.download_evf_image(evf_image)
                 
                 if image_data:
                     error_count = 0  # Reset error counter on success
                     
-                    # Calculate FPS
+                    # Calculate and smooth FPS
                     current_time = time.time()
                     fps = 1.0 / (current_time - last_frame_time)
                     last_frame_time = current_time
                     
-                    # Convert and display frame
+                    # Convert raw bytes to OpenCV image format and display
                     nparr = np.frombuffer(image_data, np.uint8)
                     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     if frame is not None:
@@ -97,9 +131,10 @@ def main():
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
                 
-                # Cap frame rate
+                # Cap frame rate to avoid overwhelming the camera
+                # Most Canon cameras support 30fps max in live view
                 elapsed = time.time() - frame_start
-                if elapsed < 1/30:  # Target 30fps
+                if elapsed < 1/30:
                     time.sleep(1/30 - elapsed)
             
             cv2.destroyAllWindows()
