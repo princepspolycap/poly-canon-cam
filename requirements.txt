@@ -1,7 +1,17 @@
-# System dependencies:
-# - tkinter (install using: brew install python-tk@3.11 on macOS)
+# Poly Canon Cam Dependencies
 
-# Python packages
-numpy==2.2.3
-opencv-python==4.11.0.86
-Pillow==10.2.0  # For GUI image handling
+# System Requirements:
+# - Python 3.8 or higher
+# - Canon EDSDK 13.18.40
+# - tkinter (GUI library)
+#   macOS: brew install python-tk@3.11
+#   Linux: sudo apt-get install python3-tk
+#   Windows: Included with Python
+
+# Core Dependencies
+numpy==2.2.3          # Array operations and image processing
+opencv-python==4.11.0.86  # Camera preview and image manipulation
+Pillow==10.2.0       # Image processing for GUI display
+
+# Note: The Canon EDSDK is not pip-installable and must be obtained from Canon
+# Place the EDSDK files in the 'EDSDK 13.18.40 Macintosh' directory
