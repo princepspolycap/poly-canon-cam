@@ -1,0 +1,7 @@
+# System dependencies:
+# - tkinter (install using: brew install python-tk@3.11 on macOS)
+
+# Python packages
+numpy==2.2.3
+opencv-python==4.11.0.86
+Pillow==10.2.0  # For GUI image handling
