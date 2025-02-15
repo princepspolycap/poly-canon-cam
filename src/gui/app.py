@@ -18,7 +18,7 @@ from tkinter import ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-from camera import CanonCamera
+from ..camera import CanonCamera
 import threading
 import queue
 
@@ -248,15 +248,12 @@ class CameraApp:
         self.stop_camera()
         self.root.destroy()
 
-def main():
+def create_app():
     """
-    Application entry point.
+    Create and configure the main application window.
     
-    Creates the main window and starts the tkinter event loop.
+    Returns:
+        CameraApp: The configured camera application instance
     """
     root = tk.Tk()
-    app = CameraApp(root)
-    root.mainloop()
-
-if __name__ == "__main__":
-    main()
+    return CameraApp(root)
