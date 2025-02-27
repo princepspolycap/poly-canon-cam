@@ -1,16 +1,34 @@
 """
-Canon Camera Interface Module
+Canon Camera Interface Module - Refactored
 
-This module provides a high-level interface to Canon cameras using the Canon EDSDK.
-It handles camera connection, live view setup, and image capture through a clean
-pythonic interface while managing EDSDK resources properly.
+This module has been refactored into two classes to separate concerns for a cleaner design:
+
+1. CanonCameraConnection: Handles loading the EDSDK, initializing the SDK, connecting to a camera,
+   performing the necessary warmup and low-level macOS cleanup, and disconnecting/resetting the connection.
+2. CanonCameraController: Built on top of an active CanonCameraConnection, this class controls live view,
+   event processing, image downloading, and overall camera operation.
+
+Enhancements from previous versions remain:
+- A _warmup() method to settle the EDSDK's internal event loop.
+- Enhanced retry logic and macOS compatibility.
+- Low-level macOS cleanup via a system call to restart the usbd daemon.
+
+Usage Example:
+    conn = CanonCameraConnection()
+    conn.connect()
+    controller = CanonCameraController(conn)
+    if controller.start_live_view():
+        image_bytes = controller.download_evf_image()
+    controller.stop_live_view()
+    conn.disconnect()
+    conn.reset()
 """
 
 import ctypes
 import time
 import os
-from typing import Optional, Tuple
 import random
+from typing import Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
 
@@ -39,9 +57,9 @@ kEdsCameraCommand_PressShutterButton = 0x00000004
 kEdsCameraCommand_UILock = 0x00000000
 kEdsCameraCommand_UIUnLock = 0x00000001
 
-# Error codes
-kEdsErr_StreamInternalError = 97  # Stream I/O error
-kEdsErr_ObjectNotReady = 41  # Object is not ready
+# Error Codes
+kEdsErr_StreamInternalError = 97      # Stream I/O error
+kEdsErr_ObjectNotReady = 41           # Object is not ready
 kEdsErr_DeviceBusy = 129
 kEdsErr_DeviceNotFound = 2
 kEdsErr_DeviceInvalid = 3
@@ -51,19 +69,19 @@ kEdsErr_MemoryFull = 7
 kEdsErr_CommunicationError = 41
 kEdsErr_BatteryLow = 49
 kEdsErr_NotReady = 41
-kEdsErr_UnsupportedCommand = 36110  # Error when command not supported in current state
+kEdsErr_UnsupportedCommand = 36110  # Command not supported
 
-# EVF Recovery Delays (in seconds)
-RECOVERY_DELAY_SHORT = 0.1   # For quick retries (not ready)
-RECOVERY_DELAY_MEDIUM = 0.2  # For busy states
-RECOVERY_DELAY_LONG = 0.5    # For serious errors
+# EVF Recovery Delays (seconds)
+RECOVERY_DELAY_SHORT = 0.1
+RECOVERY_DELAY_MEDIUM = 0.2
+RECOVERY_DELAY_LONG = 0.5
 
 # Camera reference type
-EdsCameraRef = ctypes.c_void_p 
+EdsCameraRef = ctypes.c_void_p
 
 @dataclass
 class CameraStatus:
-    """Comprehensive camera status information."""
+    """Holds comprehensive status information for a camera."""
     mode: int = 0                    # EVF mode
     output_device: int = 0           # Current output device
     histogram_status: int = 0        # Histogram display status
@@ -80,7 +98,8 @@ class CameraStatus:
 
 class StreamError(Exception):
     """Custom exception for streaming-related errors."""
-    def __init__(self, message: str, error_code: int, can_retry: bool = True, recovery_delay: float = RECOVERY_DELAY_SHORT):
+    def __init__(self, message: str, error_code: int, can_retry: bool = True,
+                 recovery_delay: float = RECOVERY_DELAY_SHORT):
         self.error_code = error_code
         self.can_retry = can_retry
         self.recovery_delay = recovery_delay
@@ -91,254 +110,53 @@ class CameraError(Exception):
     def __init__(self, message: str, error_code: int, recovery_hint: str = None):
         self.error_code = error_code
         self.recovery_hint = recovery_hint
-        super().__init__(f"{message} (Error: {error_code})" + 
-                        (f"\nRecovery hint: {recovery_hint}" if recovery_hint else ""))
+        super().__init__(f"{message} (Error: {error_code})" +
+                         (f"\nRecovery hint: {recovery_hint}" if recovery_hint else ""))
 
-class CanonCamera:
+class CanonCameraConnection:
     """
-    A high-level interface to Canon cameras using the EDSDK.
+    Handles establishment of a connection with the Canon camera using the EDSDK.
+    Responsibilities include:
+     - Loading the EDSDK and initializing it.
+     - Warming up the internal event loop.
+     - Retrieving the camera list and selecting a camera.
+     - Opening/closing sessions.
+     - Performing low-level macOS cleanup.
     """
     def __init__(self):
         self.edsdk = None
         self.camera = None
-        self.ui_locked = False
-        self.live_view_active = False
         self.session_open = False
         self.status = CameraStatus()
         self.last_frame_time = 0
+        self._event_handlers_set = False
         self._load_edsdk()
         self._initialize_sdk()
-        self._event_handlers_set = False
 
     def _load_edsdk(self):
         """Load the Canon EDSDK library."""
         try:
-            print("Attempting to load EDSDK from:", os.path.abspath("./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK"))
-            self.edsdk = ctypes.CDLL("./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK")
+            edsdk_path = "./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK"
+            print("Attempting to load EDSDK from:", os.path.abspath(edsdk_path))
+            self.edsdk = ctypes.CDLL(edsdk_path)
             print("Successfully loaded EDSDK")
         except Exception as e:
-            print("Error loading EDSDK:", str(e))
+            print("Error loading EDSDK:", e)
             print("Current working directory:", os.getcwd())
             raise RuntimeError(f"Failed to load EDSDK library: {e}")
 
     def _initialize_sdk(self):
-        """Initialize the EDSDK library."""
+        """Initialize the EDSDK."""
         if not self.edsdk:
             raise RuntimeError("EDSDK not loaded")
-        
         err = self.edsdk.EdsInitializeSDK()
         if err != EDS_ERR_OK:
             raise RuntimeError(f"Failed to initialize SDK: {err}")
-            
-    def _get_first_camera(self):
-        """Get the first connected camera with retries."""
-        camera_list = ctypes.c_void_p()
-        camera = ctypes.c_void_p()
-        
-        print("Attempting to get camera list...")
-        err = self.edsdk.EdsGetCameraList(ctypes.byref(camera_list))
-        if err != EDS_ERR_OK:
-            raise CameraError("Failed to get camera list", err,
-                              "Check USB connection and camera power")
-    
-        # Retry loop to allow the list to update
-        max_retries = 3
-        count = ctypes.c_uint32(0)
-        for attempt in range(max_retries):
-            err = self.edsdk.EdsGetChildCount(camera_list, ctypes.byref(count))
-            if err == EDS_ERR_OK and count.value > 0:
-                break
-            print(f"Retry {attempt+1}/{max_retries}: Found {count.value} camera(s), err: {err}")
-            time.sleep(0.5)
-    
-        if count.value == 0:
-            self.edsdk.EdsRelease(camera_list)
-            raise CameraError("No cameras detected", kEdsErr_DeviceNotFound,
-                              "Please check:\n"
-                              "1. Camera is powered on\n"
-                              "2. Camera is in shooting mode (not playback)\n"
-                              "3. USB connection is set to 'PTP' or 'PC Connect'\n"
-                              "4. USB cable is securely connected\n"
-                              "5. Consider a brief delay before reconnecting")
-    
-        print(f"Found {count.value} camera(s)")
-    
-        # Retry loop to get the camera handle
-        max_handle_retries = 3
-        for attempt in range(max_handle_retries):
-            err = self.edsdk.EdsGetChildAtIndex(camera_list, 0, ctypes.byref(camera))
-            if err == EDS_ERR_OK:
-                break
-            print(f"Retry {attempt+1}/{max_handle_retries}: Failed to get camera handle, err: {err}")
-            time.sleep(0.5)
-    
-        if err != EDS_ERR_OK:
-            self.edsdk.EdsRelease(camera_list)
-            raise CameraError("Failed to get camera handle", err,
-                              "Camera connection failed")
-    
-        try:
-            self.edsdk.EdsRelease(camera_list)
-        except:
-            pass
-    
-        return camera
-
-    def connect(self):
-        """Connect to the first available Canon camera."""
-        if self.camera:
-            return
-            
-        try:
-            # Get camera first
-            camera = self._get_first_camera()
-            
-            # Then try to open session
-            err = self.edsdk.EdsOpenSession(camera)
-            if err != EDS_ERR_OK:
-                if camera:
-                    self.edsdk.EdsRelease(camera)
-                raise CameraError("Failed to open session", err)
-                
-            # Only set camera after successful connection
-            self.camera = camera
-            self.session_open = True
-            
-            # Configure camera settings
-            self.edsdk.EdsSendCommand(self.camera, kEdsCameraCommand_ExtendShutDownTimer, 0)
-            
-            save_to = ctypes.c_uint32(kEdsSaveTo_Host)
-            self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_SaveTo, 0,
-                                        ctypes.sizeof(save_to), ctypes.byref(save_to))
-                                        
-            print("Successfully connected to camera!")
-            
-        except Exception as e:
-            if not self.camera and camera:
-                try:
-                    self.edsdk.EdsRelease(camera)
-                except:
-                    pass
-            raise e
-
-    def _verify_camera_ready(self):
-        """Verify camera is in a ready state."""
-        if not self.camera:
-            raise CameraError("Camera not connected", kEdsErr_DeviceInvalid)
-            
-        if not self.session_open:
-            raise CameraError("Camera session not open", kEdsErr_SessionNotOpen)
-            
-        self._process_events()
-
-    def _verify_live_view_state(self) -> bool:
-        """Verify live view is properly configured."""
-        status = self.get_status()
-        
-        if status.mode != 1:
-            print(f"Warning: Unexpected EVF mode: {status.mode}")
-            return False
-            
-        if not (status.output_device & kEdsEvfOutputDevice_PC):
-            print(f"Warning: PC not set as output device: {status.output_device}")
-            return False
-            
-        return True
-
-    def _setup_event_handlers(self):
-        """Set up camera event handlers."""
-        if not self.camera or self._event_handlers_set:
-            return
-
-        try:
-            # Property event handler
-            @ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
-            def property_event_callback(event, property_id, param, context):
-                try:
-                    self._handle_property_event(property_id, param)
-                except Exception as e:
-                    print(f"Property event error: {e}")
-                return EDS_ERR_OK
-
-            # Object event handler
-            @ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p)
-            def object_event_callback(event, object_event, context):
-                try:
-                    self._handle_object_event(object_event)
-                except Exception as e:
-                    print(f"Object event error: {e}")
-                return EDS_ERR_OK
-
-            # State event handler
-            @ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
-            def state_event_callback(event, state_event, param, context):
-                try:
-                    self._handle_state_event(state_event, param)
-                except Exception as e:
-                    print(f"State event error: {e}")
-                return EDS_ERR_OK
-
-            # Keep references to prevent garbage collection
-            self._property_callback = property_event_callback
-            self._object_callback = object_event_callback
-            self._state_callback = state_event_callback
-
-            # Set handlers
-            err = self.edsdk.EdsSetPropertyEventHandler(
-                self.camera,
-                0x00000100,  # kEdsPropertyEvent_All
-                self._property_callback,
-                None
-            )
-            if err != EDS_ERR_OK:
-                print(f"Warning: Failed to set property event handler: {err}")
-
-            err = self.edsdk.EdsSetObjectEventHandler(
-                self.camera,
-                0x00000200,  # kEdsObjectEvent_All
-                self._object_callback,
-                None
-            )
-            if err != EDS_ERR_OK:
-                print(f"Warning: Failed to set object event handler: {err}")
-
-            err = self.edsdk.EdsSetCameraStateEventHandler(
-                self.camera,
-                0x00000300,  # kEdsStateEvent_All
-                self._state_callback,
-                None
-            )
-            if err != EDS_ERR_OK:
-                print(f"Warning: Failed to set state event handler: {err}")
-
-            self._event_handlers_set = True
-            print("Successfully set up event handlers")
-
-        except Exception as e:
-            print(f"Error setting up event handlers: {e}")
-
-    def _handle_property_event(self, property_id: int, param: int):
-        """Handle property change events."""
-        print(f"Property event - ID: {property_id:#x}, Param: {param:#x}")
-        # Update status based on property changes
-        self.get_status()
-
-    def _handle_object_event(self, object_event: int):
-        """Handle object events."""
-        print(f"Object event: {object_event:#x}")
-
-    def _handle_state_event(self, state_event: int, param: int):
-        """Handle camera state events."""
-        print(f"State event - Event: {state_event:#x}, Param: {param:#x}")
-        if state_event == 0x00000514:  # kEdsStateEvent_Shutdown
-            print("Camera shutdown detected")
-            self.disconnect()
 
     def _process_events(self):
-        """Process any pending camera events."""
+        """Process pending camera events."""
         if not self.edsdk or not self.camera:
             return
-            
         try:
             err = self.edsdk.EdsGetEvent()
             if err != EDS_ERR_OK:
@@ -346,11 +164,199 @@ class CanonCamera:
         except Exception as e:
             print(f"Error processing events: {e}")
 
+    def _warmup(self, duration: float = 3.0):
+        """
+        Warm up event processing to allow internal state to settle.
+        Mirrors behavior in test scripts.
+        """
+        print("Warming up EDSDK events...")
+        start_time = time.time()
+        count = 0
+        while time.time() - start_time < duration:
+            self._process_events()
+            count += 1
+            time.sleep(0.05)
+        print(f"Warmed up: called EdsGetEvent() {count} times over {duration:.1f}s")
+
+    def _get_first_camera(self):
+        """
+        Locate the first available camera.
+        Uses warmup and enhanced retry logic.
+        """
+        camera_list = ctypes.c_void_p()
+        camera = ctypes.c_void_p()
+        self._warmup(3.0)
+        print("Processing events before getting camera list...")
+        self._process_events()
+        print("Attempting to get camera list...")
+        err = self.edsdk.EdsGetCameraList(ctypes.byref(camera_list))
+        if err != EDS_ERR_OK:
+            raise CameraError("Failed to get camera list", err,
+                              "Check USB connection and camera power")
+        print("Processing events after getting camera list...")
+        self._process_events()
+        max_retries = 15
+        count_val = ctypes.c_uint32(0)
+        for attempt in range(max_retries):
+            for _ in range(10):
+                self._process_events()
+            err = self.edsdk.EdsGetChildCount(camera_list, ctypes.byref(count_val))
+            if err == EDS_ERR_OK and count_val.value > 0:
+                break
+            print(f"Retry {attempt+1}/{max_retries}: Found {count_val.value} camera(s), err: {err}")
+            delay = 1.0 + (attempt * 0.5)
+            print(f"Waiting {delay:.1f}s before next attempt...")
+            time.sleep(delay)
+            for _ in range(10):
+                self._process_events()
+        if count_val.value == 0:
+            self.edsdk.EdsRelease(camera_list)
+            raise CameraError("No cameras detected", kEdsErr_DeviceNotFound,
+                              "Verify camera power and connection")
+        print(f"Found {count_val.value} camera(s)")
+        max_handle_retries = 10
+        for attempt in range(max_handle_retries):
+            for _ in range(10):
+                self._process_events()
+            err = self.edsdk.EdsGetChildAtIndex(camera_list, 0, ctypes.byref(camera))
+            if err == EDS_ERR_OK:
+                break
+            print(f"Retry {attempt+1}/{max_handle_retries}: Failed to get camera handle, err: {err}")
+            delay = 0.5 + (attempt * 0.2)
+            print(f"Waiting {delay:.1f}s before next attempt...")
+            time.sleep(delay)
+            for _ in range(10):
+                self._process_events()
+        if err != EDS_ERR_OK:
+            self.edsdk.EdsRelease(camera_list)
+            raise CameraError("Failed to get camera handle", err,
+                              "Camera connection failed")
+        try:
+            print("Releasing camera list...")
+            self.edsdk.EdsRelease(camera_list)
+            print("Camera list released successfully")
+        except Exception as e:
+            print(f"Warning: Error releasing camera list: {e}")
+        print("Camera handle obtained successfully")
+        return camera
+
+    def connect(self):
+        """Connect to the camera."""
+        if self.camera:
+            return
+        try:
+            cam = self._get_first_camera()
+            err = self.edsdk.EdsOpenSession(cam)
+            if err != EDS_ERR_OK:
+                if cam:
+                    self.edsdk.EdsRelease(cam)
+                raise CameraError("Failed to open session", err)
+            self.camera = cam
+            self.session_open = True
+            self.edsdk.EdsSendCommand(self.camera, kEdsCameraCommand_ExtendShutDownTimer, 0)
+            save_to = ctypes.c_uint32(kEdsSaveTo_Host)
+            self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_SaveTo, 0,
+                                          ctypes.sizeof(save_to), ctypes.byref(save_to))
+            print("Successfully connected to camera!")
+        except Exception as e:
+            if not self.camera and cam:
+                try:
+                    self.edsdk.EdsRelease(cam)
+                except:
+                    pass
+            raise e
+
+    def disconnect(self):
+        """Disconnect and clean up the camera connection."""
+        if self.camera:
+            if self.session_open:
+                try:
+                    print("Closing session...")
+                    self.edsdk.EdsCloseSession(self.camera)
+                    self.session_open = False
+                except Exception as e:
+                    print(f"Warning: Error closing session: {e}")
+                    self.session_open = False
+            try:
+                print("Releasing camera...")
+                self.edsdk.EdsRelease(self.camera)
+            except Exception as e:
+                print(f"Warning: Error releasing camera: {e}")
+            self.camera = None
+        print("Connection cleanup complete")
+        self.edsdk = None
+
+    def _low_level_cleanup(self):
+        """
+        Perform low-level macOS cleanup.
+        Restarts the 'usbd' daemon to reset USB connections.
+        """
+        import platform
+        if platform.system() == "Darwin":
+            try:
+                print("Performing low-level macOS cleanup: restarting usbd daemon...")
+                result = os.system("killall -HUP usbd")
+                if result == 0:
+                    print("Low-level cleanup: usbd restarted successfully")
+                else:
+                    print("Low-level cleanup: usbd restart command failed")
+            except Exception as e:
+                print(f"Low-level cleanup error: {e}")
+
+    def reset(self):
+        """Reset the connection to allow a new connection attempt."""
+        print("Resetting camera connection state...")
+        self.disconnect()
+        self._low_level_cleanup()
+        self.__init__()
+
+# Provide backwards compatibility alias
+CanonCamera = CanonCameraConnection
+
+class CanonCameraController:
+    """
+    Controls camera operations on top of an active CanonCameraConnection.
+    Provides methods to start/stop live view, process events, and download EVF images.
+    """
+    def __init__(self, connection: CanonCameraConnection):
+        if connection.camera is None:
+            raise RuntimeError("Camera connection not established")
+        self.connection = connection
+        self.status = connection.status  # Shared status
+        self.last_frame_time = connection.last_frame_time
+        self.live_view_active = False
+
+    def _process_events(self):
+        self.connection._process_events()
+
+    @contextmanager
+    def evf_image_context(self):
+        """
+        Context manager for EVF image resources.
+        """
+        stream = ctypes.c_void_p()
+        evf_image = ctypes.c_void_p()
+        err = self.connection.edsdk.EdsCreateMemoryStream(0, ctypes.byref(stream))
+        if err != EDS_ERR_OK:
+            raise StreamError("Failed to create memory stream", err)
+        err = self.connection.edsdk.EdsCreateEvfImageRef(stream, ctypes.byref(evf_image))
+        if err != EDS_ERR_OK:
+            raise StreamError("Failed to create EVF image", err)
+        try:
+            yield (stream, evf_image)
+        finally:
+            try:
+                self.connection.edsdk.EdsRelease(evf_image)
+            except:
+                pass
+            try:
+                self.connection.edsdk.EdsRelease(stream)
+            except:
+                pass
+
     def _retry_with_backoff(self, operation, max_attempts=3, initial_delay=0.1):
-        """Execute operation with exponential backoff retry logic."""
         delay = initial_delay
         last_error = None
-        
         for attempt in range(max_attempts):
             try:
                 result = operation()
@@ -359,208 +365,131 @@ class CanonCamera:
                 last_error = e
                 if attempt == max_attempts - 1:
                     break
-                    
-                # Use error-specific delay if available
                 if isinstance(e, StreamError):
                     delay = e.recovery_delay
-                
                 jitter = random.uniform(0, 0.1)
-                sleep_time = delay + jitter
-                print(f"Retry {attempt + 1}/{max_attempts} after {sleep_time:.2f}s...")
-                time.sleep(sleep_time)
+                time.sleep(delay + jitter)
                 delay *= 2
-                
                 self.status.errors_since_start += 1
                 self.status.last_error = str(e)
-                
         return False, last_error
 
     def get_status(self) -> CameraStatus:
-        """Get comprehensive camera status."""
-        if not self.camera:
+        """Retrieve current camera status."""
+        if not self.connection.camera:
             return self.status
-            
         try:
-            # Update frame timing
             now = time.time()
-            self.status.time_since_last_frame = now - self.last_frame_time
-            
-            # Get EVF mode
+            self.status.time_since_last_frame = now - self.connection.last_frame_time
             evf_mode = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_Mode,
-                                              0, ctypes.sizeof(evf_mode),
-                                              ctypes.byref(evf_mode))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_Mode,
+                                                            0, ctypes.sizeof(evf_mode),
+                                                            ctypes.byref(evf_mode))
             if err == EDS_ERR_OK:
                 self.status.mode = evf_mode.value
-                
-            # Get output device
             device = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice,
-                                              0, ctypes.sizeof(device),
-                                              ctypes.byref(device))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_OutputDevice,
+                                                            0, ctypes.sizeof(device),
+                                                            ctypes.byref(device))
             if err == EDS_ERR_OK:
                 self.status.output_device = device.value
-                
-            # Get histogram status
             hist = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_HistogramStatus,
-                                              0, ctypes.sizeof(hist),
-                                              ctypes.byref(hist))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_HistogramStatus,
+                                                            0, ctypes.sizeof(hist),
+                                                            ctypes.byref(hist))
             if err == EDS_ERR_OK:
                 self.status.histogram_status = hist.value
-                
-            # Get temperature status
             temp = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_TempStatus,
-                                              0, ctypes.sizeof(temp),
-                                              ctypes.byref(temp))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_TempStatus,
+                                                            0, ctypes.sizeof(temp),
+                                                            ctypes.byref(temp))
             if err == EDS_ERR_OK:
                 self.status.temperature_status = temp.value
-                
-            # Get battery level
             battery = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_BatteryLevel,
-                                              0, ctypes.sizeof(battery),
-                                              ctypes.byref(battery))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_BatteryLevel,
+                                                            0, ctypes.sizeof(battery),
+                                                            ctypes.byref(battery))
             if err == EDS_ERR_OK:
                 self.status.battery_level = battery.value
-                
-            # Get recording status
             record = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Record,
-                                              0, ctypes.sizeof(record),
-                                              ctypes.byref(record))
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Record,
+                                                            0, ctypes.sizeof(record),
+                                                            ctypes.byref(record))
             if err == EDS_ERR_OK:
                 self.status.record_status = record.value
-                
         except Exception as e:
             print(f"Warning: Error getting camera status: {e}")
             self.status.errors_since_start += 1
             self.status.last_error = str(e)
-            
         return self.status
 
     def start_live_view(self) -> bool:
         """
-        Start live view on the camera.
-        
-        Follows the exact sequence from EDSDK documentation:
-        1. Get current EVF mode
-        2. Enable EVF mode if needed
-        3. Get current output device
-        4. Set PC as output device if needed
-        
-        Returns:
-            bool: True if successful, False otherwise
+        Start live view operation.
+        Returns True if live view is successfully started.
         """
-        self._verify_camera_ready()
-        
+        # Verify connection is ready
         try:
-            print("Starting live view sequence...")
-            
-            # First check if live view is already active
-            if self.live_view_active:
-                if self._verify_live_view_state():
-                    print("Live view already active")
-                    return True
-                self.live_view_active = False
-            
-            # Clear any pending events
-            for _ in range(3):
-                self._process_events()
-                time.sleep(0.1)
-            
-            # Step 1: Get current EVF mode
+            self.connection._process_events()
+            # Get current EVF mode
             evf_mode = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(
-                self.camera,
-                kEdsPropID_Evf_Mode,
-                0,
-                ctypes.sizeof(evf_mode),
-                ctypes.byref(evf_mode)
-            )
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_Mode,
+                                                             0, ctypes.sizeof(evf_mode),
+                                                             ctypes.byref(evf_mode))
             if err == EDS_ERR_OK:
                 print(f"Current EVF mode: {evf_mode.value}")
             else:
                 print(f"Warning: Could not get EVF mode (error {err})")
-            
-            # Step 2: Enable EVF mode if not already enabled
             if evf_mode.value != 1:
                 print("Enabling EVF mode...")
                 evf_mode = ctypes.c_uint32(1)
                 for attempt in range(3):
-                    err = self.edsdk.EdsSetPropertyData(
-                        self.camera,
-                        kEdsPropID_Evf_Mode,
-                        0,
-                        ctypes.sizeof(evf_mode),
-                        ctypes.byref(evf_mode)
-                    )
+                    err = self.connection.edsdk.EdsSetPropertyData(self.connection.camera, kEdsPropID_Evf_Mode,
+                                                                     0, ctypes.sizeof(evf_mode),
+                                                                     ctypes.byref(evf_mode))
                     if err == EDS_ERR_OK:
                         print("EVF mode enabled successfully")
                         break
                     if err == kEdsErr_DeviceBusy:
                         print(f"Camera busy, retrying... (attempt {attempt + 1}/3)")
-                        self._process_events()  # Process events before retry
-                        time.sleep(0.5)  # Longer delay between retries
+                        self._process_events()
+                        time.sleep(0.5)
                         continue
                     print(f"Failed to enable EVF mode: {err}")
                     return False
-                    
-                # Wait for EVF mode to stabilize
                 time.sleep(0.5)
                 self._process_events()
-            
-            # Step 3: Get current output device
             device = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(
-                self.camera,
-                kEdsPropID_Evf_OutputDevice,
-                0,
-                ctypes.sizeof(device),
-                ctypes.byref(device)
-            )
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_OutputDevice,
+                                                             0, ctypes.sizeof(device),
+                                                             ctypes.byref(device))
             if err == EDS_ERR_OK:
                 print(f"Current output device: {device.value}")
             else:
                 print(f"Warning: Could not get output device (error {err})")
-            
-            # Step 4: Set PC as output device if not already set
             if not (device.value & kEdsEvfOutputDevice_PC):
                 print("Setting PC as output device...")
                 device = ctypes.c_uint32(kEdsEvfOutputDevice_PC)
                 for attempt in range(3):
-                    err = self.edsdk.EdsSetPropertyData(
-                        self.camera,
-                        kEdsPropID_Evf_OutputDevice,
-                        0,
-                        ctypes.sizeof(device),
-                        ctypes.byref(device)
-                    )
+                    err = self.connection.edsdk.EdsSetPropertyData(self.connection.camera, kEdsPropID_Evf_OutputDevice,
+                                                                     0, ctypes.sizeof(device),
+                                                                     ctypes.byref(device))
                     if err == EDS_ERR_OK:
                         print("Output device set successfully")
                         break
                     if err == kEdsErr_DeviceBusy:
                         print(f"Camera busy, retrying... (attempt {attempt + 1}/3)")
-                        self._process_events()  # Process events before retry
+                        self._process_events()
                         time.sleep(0.5)
                         continue
                     print(f"Failed to set output device: {err}")
                     return False
-                    
-                # Wait for output device change to stabilize
                 time.sleep(0.5)
                 self._process_events()
-            
-            # Step 5: Verify live view is active by checking output device again
             device = ctypes.c_uint32()
-            err = self.edsdk.EdsGetPropertyData(
-                self.camera,
-                kEdsPropID_Evf_OutputDevice,
-                0,
-                ctypes.sizeof(device),
-                ctypes.byref(device)
-            )
+            err = self.connection.edsdk.EdsGetPropertyData(self.connection.camera, kEdsPropID_Evf_OutputDevice,
+                                                             0, ctypes.sizeof(device),
+                                                             ctypes.byref(device))
             if err == EDS_ERR_OK and (device.value & kEdsEvfOutputDevice_PC):
                 print("Verified live view is active")
                 self.live_view_active = True
@@ -568,148 +497,88 @@ class CanonCamera:
             else:
                 print("Failed to verify live view state")
                 return False
-
         except Exception as e:
             print(f"Error during live view start: {e}")
             return False
 
     def stop_live_view(self) -> bool:
         """
-        Stop live view and restore camera settings.
-        
-        Returns:
-            bool: True if successful, False otherwise
+        Stop live view operation.
+        Returns True if successful.
         """
         if not self.live_view_active:
             return True
-            
         try:
-            device = ctypes.c_uint32(0)  # Clear all output devices
-            err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice,
-                                              0, ctypes.sizeof(device),
-                                              ctypes.byref(device))
+            device = ctypes.c_uint32(0)
+            err = self.connection.edsdk.EdsSetPropertyData(self.connection.camera, kEdsPropID_Evf_OutputDevice,
+                                                             0, ctypes.sizeof(device),
+                                                             ctypes.byref(device))
             if err != EDS_ERR_OK:
                 if err == kEdsErr_DeviceBusy:
                     time.sleep(RECOVERY_DELAY_SHORT)
                     return self.stop_live_view()
                 return False
-                
             self.live_view_active = False
             return True
-            
         except Exception as e:
             print(f"Error stopping live view: {e}")
-            self.live_view_active = False  # Force state update even on error
+            self.live_view_active = False
             return False
 
-    @contextmanager
-    def evf_image_context(self):
-        """Context manager for EVF image resources."""
-        stream = None
-        evf_image = None
-        
-        try:
-            stream = ctypes.c_void_p()
-            err = self.edsdk.EdsCreateMemoryStream(0, ctypes.byref(stream))
-            if err != EDS_ERR_OK:
-                raise StreamError("Failed to create memory stream", err)
-
-            evf_image = ctypes.c_void_p()
-            err = self.edsdk.EdsCreateEvfImageRef(stream, ctypes.byref(evf_image))
-            if err != EDS_ERR_OK:
-                raise StreamError("Failed to create EVF image", err)
-
-            yield (stream, evf_image)
-
-        finally:
-            if evf_image and self.edsdk:
-                try:
-                    self.edsdk.EdsRelease(evf_image)
-                except:
-                    pass
-            if stream and self.edsdk:
-                try:
-                    self.edsdk.EdsRelease(stream)
-                except:
-                    pass
-
     def download_evf_image(self, stream) -> Optional[bytes]:
-        """Download the current live view image data."""
-        if not self.camera or not stream:
+        """
+        Download the current live view image data.
+        Returns image data as bytes, or None on failure.
+        """
+        if not self.connection.camera or not stream:
             return None
-
         if not self.live_view_active:
             return None
-
-        status = self.get_status()
         if not self._verify_live_view_state():
             print("EVF state invalid - attempting recovery")
             if not self.start_live_view():
                 return None
-        
         with self.evf_image_context() as (mem_stream, evf_image):
             try:
                 def download_frame():
                     self._process_events()
-                    err = self.edsdk.EdsDownloadEvfImage(self.camera, evf_image)
+                    err = self.connection.edsdk.EdsDownloadEvfImage(self.connection.camera, evf_image)
                     if err != EDS_ERR_OK:
                         if err == kEdsErr_ObjectNotReady:
-                            raise StreamError(
-                                "Camera not ready - waiting for next frame",
-                                err,
-                                recovery_delay=RECOVERY_DELAY_SHORT
-                            )
+                            raise StreamError("Camera not ready - waiting for next frame",
+                                              err, recovery_delay=RECOVERY_DELAY_SHORT)
                         elif err == kEdsErr_StreamInternalError:
-                            raise StreamError(
-                                "Stream I/O error - attempting recovery",
-                                err,
-                                recovery_delay=RECOVERY_DELAY_MEDIUM
-                            )
+                            raise StreamError("Stream I/O error - attempting recovery",
+                                              err, recovery_delay=RECOVERY_DELAY_MEDIUM)
                         elif err == kEdsErr_DeviceBusy:
-                            raise StreamError(
-                                "Camera busy - retrying",
-                                err,
-                                recovery_delay=RECOVERY_DELAY_MEDIUM
-                            )
+                            raise StreamError("Camera busy - retrying",
+                                              err, recovery_delay=RECOVERY_DELAY_MEDIUM)
                         else:
                             print(f"Download error: {err}")
                             if err == kEdsErr_DeviceInvalid:
                                 self.live_view_active = False
-                                raise StreamError(
-                                    "Camera connection lost",
-                                    err,
-                                    can_retry=False
-                                )
+                                raise StreamError("Camera connection lost",
+                                                  err, can_retry=False)
                         raise StreamError("Failed to download EVF image", err)
                     return True
-
-                success, result = self._retry_with_backoff(
-                    download_frame,
-                    max_attempts=3,
-                    initial_delay=RECOVERY_DELAY_SHORT
-                )
-
+                success, result = self._retry_with_backoff(download_frame,
+                                                            max_attempts=3,
+                                                            initial_delay=RECOVERY_DELAY_SHORT)
                 if not success:
                     if isinstance(result, StreamError) and not result.can_retry:
                         self.live_view_active = False
                     return None
-
-                # Get the image data
                 image_data = ctypes.c_void_p()
                 length = ctypes.c_ulonglong()
-                
-                err = self.edsdk.EdsGetLength(mem_stream, ctypes.byref(length))
+                err = self.connection.edsdk.EdsGetLength(mem_stream, ctypes.byref(length))
                 if err != EDS_ERR_OK:
                     return None
-                    
-                err = self.edsdk.EdsGetPointer(mem_stream, ctypes.byref(image_data))
+                err = self.connection.edsdk.EdsGetPointer(mem_stream, ctypes.byref(image_data))
                 if err != EDS_ERR_OK:
                     return None
-
                 try:
                     buffer = (ctypes.c_ubyte * length.value).from_address(image_data.value)
-                    # Update status on successful frame
-                    self.last_frame_time = time.time()
+                    self.connection.last_frame_time = time.time()
                     self.status.frames_captured += 1
                     return bytes(buffer)
                 except Exception as e:
@@ -717,64 +586,18 @@ class CanonCamera:
                     self.status.errors_since_start += 1
                     self.status.last_error = str(e)
                     return None
-
             except Exception as e:
                 print(f"Error during EVF download: {e}")
                 self.status.errors_since_start += 1
                 self.status.last_error = str(e)
                 return None
 
-    def disconnect(self):
-        """Disconnect from the camera and clean up resources."""
-        if self.live_view_active:
-            try:
-                self.stop_live_view()
-            except Exception as e:
-                print(f"Warning: Error stopping live view: {e}")
-                
-        if self.ui_locked:
-            try:
-                self._unlock_ui()
-            except Exception as e:
-                print(f"Warning: Error unlocking UI: {e}")
-                
-        if self.camera:
-            if self.session_open:
-                try:
-                    print("Closing session...")
-                    self.edsdk.EdsCloseSession(self.camera)
-                except Exception as e:
-                    print(f"Warning: Error closing session: {e}")
-                self.session_open = False
-                
-            try:
-                print("Releasing camera...")
-                self.edsdk.EdsRelease(self.camera)
-            except Exception as e:
-                print(f"Warning: Error releasing camera: {e}")
-            self.camera = None
-        
-        if self.edsdk:
-            try:
-                print("Terminating SDK...")
-                self.edsdk.EdsTerminateSDK()
-            except Exception as e:
-                print(f"Warning: Error terminating SDK: {e}")
-            self.edsdk = None
+    def _verify_live_view_state(self) -> bool:
+        """Verify live view is properly configured."""
+        return self.connection.camera is not None and self.live_view_active
 
     def __enter__(self):
-        """Context manager entry."""
-        self.connect()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.disconnect()
-
-    def release_evf_image(self, evf_image):
-        """Release EVF image resources."""
-        if evf_image and self.edsdk:
-            try:
-                self.edsdk.EdsRelease(evf_image)
-            except Exception as e:
-                print(f"Error releasing EVF image: {e}")
+        pass

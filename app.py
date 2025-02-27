@@ -16,7 +16,7 @@ Requirements:
 
 import sys
 import os
-from src.gui.app import create_app
+from src.gui import create_app
 
 def check_requirements():
     """
@@ -58,7 +58,13 @@ def main():
         sys.exit(1)
 
     try:
+        # Create the application window
         app = create_app()
+        
+        # Configure the window before showing
+        app.root.update_idletasks()
+        
+        # Start the event loop
         app.root.mainloop()
     except Exception as e:
         print(f"\nError starting application: {e}")

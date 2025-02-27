@@ -7,7 +7,7 @@ focusing on window creation, widget initialization, and basic interactions.
 
 import unittest
 import tkinter as tk
-from src.gui.app import create_app, CameraApp
+from src.gui import create_app, CameraApp
 
 class TestGUIApp(unittest.TestCase):
     def setUp(self):
