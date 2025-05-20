@@ -6,3 +6,6 @@ Pillow>=9.0.0    # Image processing for GUI display
 # Testing
 pytest>=7.0.0    # Modern Python testing framework
 pytest-cov>=4.0.0    # Test coverage reporting
+
+# Virtual Webcam
+syphon-python>=0.1.1

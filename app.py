@@ -38,7 +38,9 @@ def check_requirements():
 
     # Check for EDSDK
     edsdk_path = "./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK"
-    if not os.path.exists(edsdk_path):
+    if os.path.exists(edsdk_path):
+        print(f"Found EDSDK: Version 13.18.40 (Macintosh) at {os.path.abspath(edsdk_path)}")
+    else:
         print("\nError: EDSDK library not found")
         print(f"Expected path: {os.path.abspath(edsdk_path)}")
         print("\nPlease ensure Canon EDSDK is installed correctly")

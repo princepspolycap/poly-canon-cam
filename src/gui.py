@@ -19,8 +19,8 @@ from tkinter import ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-from . import CanonCamera, LiveViewManager
-from .camera import EDS_ERR_OK, CameraError
+from . import CanonCamera, LiveViewManager, SyphonWebcamOutput
+from .camera import EDS_ERR_OK, CameraError, CanonCameraController
 import threading
 import queue
 import time
@@ -117,7 +117,9 @@ class CameraApp:
         
         # Initialize variables
         self.camera = None
+        self.controller = None
         self.live_view = None
+        self.syphon_output = None
         self.is_running = False
         self.frame_queue = queue.Queue(maxsize=1)
         self.show_frame_id = None
@@ -168,6 +170,7 @@ class CameraApp:
                     return
             
             self.log_display.log("Connected to camera, waiting for device to stabilize...")
+            self.controller = CanonCameraController(self.camera) # Initialize controller
             self.status_label.configure(text="Camera: Initializing...")
             self.root.update()
             
@@ -176,12 +179,38 @@ class CameraApp:
             
             # Initialize LiveViewManager first
             self.log_display.log("Initializing live view manager...")
-            self.live_view = LiveViewManager(self.camera, self.target_fps)
+            self.live_view = LiveViewManager(self.controller, self.target_fps)
             
             self.log_display.log("Starting live view...")
             try:
                 self.live_view.start()
                 self.is_running = True
+                if self.is_running: # Ensure live view started successfully
+                    try:
+                        # Get frame dimensions from canvas or a default, Syphon needs width/height
+                        # It's better if the camera can provide actual stream dimensions.
+                        # For now, let's use the canvas dimensions as a placeholder.
+                        # This might need adjustment if stream dimensions differ.
+                        width = self.canvas.winfo_width() 
+                        height = self.canvas.winfo_height()
+                        if width <= 1 or height <= 1: # Canvas might not be realized yet
+                            width, height = 1280, 720 # Fallback default
+                            self.log_display.log(f"Canvas not realized, using default {width}x{height} for Syphon.")
+
+                        self.syphon_output = SyphonWebcamOutput() # Default server name "CanonCamSyphon"
+                        self.syphon_output.start(width, height)
+                        if self.syphon_output.is_running:
+                            self.log_display.log("Syphon output server started.")
+                        else:
+                            self.log_display.log("Syphon output server failed to start. Webcam functionality may not work.")
+                            # Optionally, set self.syphon_output to None if it failed
+                            if self.syphon_output and not self.syphon_output.is_running:
+                                 self.syphon_output = None
+                    except Exception as e:
+                        self.log_display.log(f"Error initializing Syphon output: {e}")
+                        if self.syphon_output: # Ensure cleanup if partial init
+                            self.syphon_output.stop()
+                        self.syphon_output = None
             except Exception as e:
                 error_msg = f"Error: Failed to start live view - {str(e)}"
                 self.error_var.set(error_msg)
@@ -192,6 +221,8 @@ class CameraApp:
                     except:
                         pass
                     self.live_view = None
+                if self.controller: # Clean up controller
+                    self.controller = None
                 if self.camera:
                     try:
                         self.camera.disconnect()
@@ -238,6 +269,11 @@ class CameraApp:
                             if frame is not None:
                                 # Convert BGR to RGB
                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                if self.syphon_output and self.syphon_output.is_running:
+                                    try:
+                                        self.syphon_output.send_frame(frame_rgb)
+                                    except Exception as e:
+                                        self.log_display.log(f"Error sending frame to Syphon: {e}")
                                 # Put frame in queue
                                 if not self.frame_queue.full():
                                     self.frame_queue.put(frame_rgb)
@@ -292,9 +328,9 @@ class CameraApp:
 
     def update_status(self):
         """Update status display with current statistics."""
-        if self.is_running and self.camera:
+        if self.is_running and self.controller:
             try:
-                status = self.camera.get_status()
+                status = self.controller.get_status()
                 stats = (
                     f"FPS: {self.frame_monitor.current_fps:.1f} "
                     f"(Avg: {self.frame_monitor.average_fps:.1f}) | "
@@ -341,6 +377,14 @@ class CameraApp:
             except Exception as e:
                 self.log_display.log(f"Error disconnecting camera: {e}")
             self.camera = None
+        if self.syphon_output:
+            try:
+                self.syphon_output.stop()
+                self.log_display.log("Syphon output server stopped.")
+            except Exception as e:
+                self.log_display.log(f"Error stopping Syphon output: {e}")
+            self.syphon_output = None
+        self.controller = None # Clean up controller
         
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
