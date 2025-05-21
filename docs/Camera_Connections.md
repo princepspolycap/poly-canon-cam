@@ -1,10 +1,10 @@
 # Reliable Canon Camera Connection for macOS and Python
 
-Based on the Canon EDSDK documentation and your specific needs for macOS, here's a focused guide on establishing reliable connections to Canon cameras in Python.
+Based on the Canon EDSDK 13.19.0 documentation and your specific needs for macOS, here's a focused guide on establishing reliable connections to Canon cameras in Python.
 
 ## Direct Quote from Documentation
 
-From EDSDK API Programming Reference, page 31, section 2.10:
+From EDSDK 13.19.0 API Programming Reference, page 31, section 2.10:
 
 > **"Notes on Developing Macintosh Applications**
 >
@@ -30,7 +30,7 @@ def connect_to_canon_camera():
     
     # 1. Load EDSDK library
     # Adjust path as needed for your installation
-    edsdk_path = "./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK"
+    edsdk_path = "./EDSDK 13.19.0 Macintosh/EDSDK.framework/Versions/A/EDSDK"
     try:
         edsdk = ctypes.CDLL(edsdk_path)
         print("EDSDK loaded successfully")
@@ -183,6 +183,22 @@ if __name__ == "__main__":
         print("Failed to connect to camera")
 ```
 
+## macOS Connection Cleanup
+
+Before attempting to connect, it's highly recommended to clean up any previous USB/camera connections, especially after errors or disconnections:
+
+```python
+from src.camera_utils import cleanup_macos_camera_connection
+
+# Before attempting a new connection:
+cleanup_macos_camera_connection(extra_kill_canon_processes=True, verbose=True)
+```
+
+This utility performs the following critical steps:
+- Resets macOS USB daemon (`usbd`) to clear any stale USB device state
+- Optionally kills Canon EOS Webcam Utility background processes that may interfere with exclusive camera access
+- Waits for the OS to properly reset USB device state
+
 ## macOS-Specific Connection Troubleshooting
 
 If you're still experiencing issues, try these specific steps:
@@ -201,7 +217,7 @@ If you're still experiencing issues, try these specific steps:
 
 7. **Framework Location**: For macOS applications, the EDSDK.framework should be placed in:
 
-   ```
+   ```bash
    ${AppFolder}/Contents/frameworks/
    ```
 

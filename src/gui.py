@@ -2,29 +2,33 @@
 GUI Application Module for Poly Canon Cam
 
 This module provides a graphical user interface for controlling and viewing
-Canon camera live preview. It uses tkinter for the GUI and handles camera
-operations in a separate thread to maintain UI responsiveness.
-
-Features:
-- Live preview display with automatic resizing
-- Start/Stop camera controls
-- Status indicators
-- Clean shutdown handling
-- Thread-safe frame capture and display
+Canon camera live preview. It uses tkinter for the GUI. Camera operations
+are handled by CanonCameraConnection in a separate worker thread to maintain
+UI responsiveness.
 """
 
-import ctypes
 import tkinter as tk
 from tkinter import ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-from . import CanonCamera, LiveViewManager, SyphonWebcamOutput
-from .camera import EDS_ERR_OK, CameraError, CanonCameraController
-import threading
 import queue
 import time
 import collections
+import threading
+
+# Assuming CanonCameraConnection and its constants are in the same directory or accessible
+from .canon_camera_connection import (
+    CanonCameraConnection,
+    CMD_CONNECT, CMD_DISCONNECT, CMD_START_LIVE_VIEW, CMD_STOP_LIVE_VIEW,
+    CMD_GET_CAMERA_INFO, CMD_GET_STATUS, CMD_SHUTDOWN,
+    MSG_STATUS_UPDATE, MSG_ERROR, MSG_CAMERA_INFO, MSG_LIVE_FRAME,
+    MSG_CONNECTION_STATUS, MSG_LOG
+)
+from src.camera_constants import CameraError
+from . import SyphonWebcamOutput # Keep for now
+from . import gui_style
+
 
 class FrameRateMonitor:
     """Monitor and calculate frame rate statistics."""
@@ -33,7 +37,7 @@ class FrameRateMonitor:
         self.total_frames = 0
         self.start_time = time.time()
         
-    def update(self):
+    def new_frame(self):
         """Record a new frame."""
         self.frame_times.append(time.time())
         self.total_frames += 1
@@ -43,362 +47,496 @@ class FrameRateMonitor:
         """Calculate current frames per second."""
         if len(self.frame_times) < 2:
             return 0.0
-        return len(self.frame_times) / (self.frame_times[-1] - self.frame_times[0])
+        # Ensure denominator is not zero
+        delta_time = self.frame_times[-1] - self.frame_times[0]
+        return (len(self.frame_times) -1) / delta_time if delta_time > 0 else 0.0
     
     @property
     def average_fps(self):
         """Calculate average FPS since start."""
         elapsed = time.time() - self.start_time
-        if elapsed > 0:
-            return self.total_frames / elapsed
-        return 0.0
+        return self.total_frames / elapsed if elapsed > 0 else 0.0
+
 
 class LogDisplay:
     """Display for camera and system logs."""
     def __init__(self, parent):
-        self.frame = ttk.LabelFrame(parent, text="System Log")
-        self.text = tk.Text(self.frame, height=6, width=50)
-        self.text.pack(padx=5, pady=5, fill="both", expand=True)
-        self.frame.pack(padx=5, pady=5, fill="x")
+        self.frame = ttk.LabelFrame(parent, text="System Log", style='Card.TLabelframe')
+        self.text = tk.Text(
+            self.frame, height=6, width=40, bg=gui_style.COLORS['bg_light'],
+            fg=gui_style.COLORS['text_primary'], font=('SF Pro Text', 12), wrap=tk.WORD,
+            padx=8, pady=8, relief='flat', borderwidth=0
+        )
+        scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.text.yview, style="Vertical.TScrollbar")
+        self.text.pack(side='left', fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side='right', fill='y', padx=(0, 8), pady=8)
+        self.text.configure(yscrollcommand=scrollbar.set)
         
-    def log(self, message):
+    def log(self, message, timestamp=True):
         """Add a message to the log."""
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        self.text.insert("end", f"[{timestamp}] {message}\n")
-        self.text.see("end")  # Auto-scroll to bottom
+        prefix = f"[{time.strftime('%H:%M:%S', time.localtime())}] " if timestamp else ""
+        self.text.insert("end", f"{prefix}{message}\n")
+        self.text.see("end")
         
     def clear(self):
-        """Clear all log entries."""
         self.text.delete(1.0, "end")
+
 
 class CameraApp:
     """Main GUI application class for Canon camera control."""
     def __init__(self, root):
         self.root = root
         self.root.title("Canon Camera Viewer - Princeps Polycap Productions")
+        self.root.configure(bg=gui_style.COLORS['bg_dark'])
+        self.root.option_add('*TCombobox*Listbox.background', gui_style.COLORS['bg_light'])
+        self.root.option_add('*TCombobox*Listbox.foreground', gui_style.COLORS['text_primary'])
+        self.root.option_add('*TCombobox*Listbox.selectBackground', gui_style.COLORS['primary'])
         
-        # Main container
-        self.main_frame = ttk.Frame(self.root, padding="10")
-        self.main_frame.pack(fill="both", expand=True)
+        # Setup main container
+        self.main_container = gui_style.create_gradient_frame(self.root)
+        self.main_container.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Create canvas for video display
-        self.canvas = tk.Canvas(self.main_frame, width=1280, height=720, bg="black")
-        self.canvas.pack(pady=5)
+        # Header section
+        self.header_frame = ttk.Frame(self.main_container, style='TFrame')
+        self.header_frame.pack(fill="x", padx=5, pady=(5, 15))
         
-        # Status display
-        self.status_frame = ttk.LabelFrame(self.main_frame, text="Camera Status")
-        self.status_frame.pack(fill="x", padx=5, pady=5)
+        self.title_label = ttk.Label(self.header_frame, text="Canon Camera Control", style='Title.TLabel')
+        self.title_label.pack(side=tk.LEFT, padx=10)
         
-        # Stats display
+        # Connection status display in header
+        self.connection_frame = ttk.Frame(self.header_frame, style='TFrame')
+        self.connection_frame.pack(side=tk.RIGHT, padx=10)
+        
+        self.status_icon_label = ttk.Label(self.connection_frame, text="●", style='StatusIcon.TLabel')
+        self.status_icon_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.connection_var = tk.StringVar(value="Disconnected")
+        self.connection_label = ttk.Label(self.connection_frame, textvariable=self.connection_var, style='Status.TLabel')
+        self.connection_label.pack(side=tk.LEFT)
+        
+        # Main content - split into two panes: Live View (left) and Controls (right)
+        self.content_frame = ttk.Frame(self.main_container, style='TFrame')
+        self.content_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Create PanedWindow for resizable split
+        self.paned_window = ttk.PanedWindow(self.content_frame, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill="both", expand=True)
+        
+        # Left pane - Live View
+        self.live_view_frame = gui_style.create_gradient_frame(self.paned_window, 
+                                                              bg_color=gui_style.COLORS['bg_medium'])
+        
+        # Right pane - Controls
+        self.controls_frame = ttk.Frame(self.paned_window, style='TFrame')
+        
+        self.paned_window.add(self.live_view_frame, weight=3)  # Give live view more space
+        self.paned_window.add(self.controls_frame, weight=1)
+        
+        # Live View Canvas
+        self.canvas_container = ttk.Frame(self.live_view_frame, style='TFrame')
+        self.canvas_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self.canvas_header = ttk.Label(self.canvas_container, text="Camera Live View", style='TLabel')
+        self.canvas_header.pack(fill="x", padx=5, pady=(0, 5))
+        
+        self.canvas = tk.Canvas(
+            self.canvas_container, 
+            bg=gui_style.COLORS['bg_dark'],
+            highlightthickness=1,
+            highlightbackground=gui_style.COLORS['border']
+        )
+        self.canvas.pack(fill="both", expand=True)
+        
+        # Stats bar below canvas
+        self.stats_frame = ttk.Frame(self.canvas_container, style='TFrame')
+        self.stats_frame.pack(fill="x", padx=5, pady=5)
+        
         self.stats_var = tk.StringVar()
-        self.stats_label = ttk.Label(self.status_frame, textvariable=self.stats_var)
-        self.stats_label.pack(fill="x", padx=5, pady=2)
+        self.stats_label = ttk.Label(self.stats_frame, textvariable=self.stats_var, style='Stats.TLabel')
+        self.stats_label.pack(side=tk.LEFT, fill="x", expand=True)
         
-        # Error display
         self.error_var = tk.StringVar()
-        self.error_label = ttk.Label(self.status_frame, textvariable=self.error_var, 
-                                   foreground="red")
-        self.error_label.pack(fill="x", padx=5, pady=2)
+        self.error_label = ttk.Label(self.stats_frame, textvariable=self.error_var, style='Error.TLabel')
+        self.error_label.pack(side=tk.RIGHT)
         
-        # Log display
-        self.log_display = LogDisplay(self.main_frame)
+        # Controls Panel (right side)
+        # 1. Camera Info Card
+        self.info_card = ttk.LabelFrame(self.controls_frame, text="Camera Information", style='Card.TLabelframe')
+        self.info_card.pack(fill="x", padx=10, pady=10)
         
-        # Control buttons
-        self.btn_frame = ttk.Frame(self.main_frame)
-        self.btn_frame.pack(pady=5)
+        self.camera_info_var = tk.StringVar(value="No Camera Connected")
+        self.camera_info_label = ttk.Label(self.info_card, textvariable=self.camera_info_var, style='Info.TLabel')
+        self.camera_info_label.pack(fill="x", padx=8, pady=8)
         
-        self.start_btn = ttk.Button(self.btn_frame, text="Start Camera", 
-                                  command=self.start_camera)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
+        # 2. Connection Controls
+        self.connection_card = ttk.LabelFrame(self.controls_frame, text="Connection", style='Card.TLabelframe')
+        self.connection_card.pack(fill="x", padx=10, pady=10)
         
-        self.stop_btn = ttk.Button(self.btn_frame, text="Stop Camera", 
-                                 command=self.stop_camera, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, padx=5)
+        self.connection_buttons_frame = ttk.Frame(self.connection_card, style='Card.TFrame')
+        self.connection_buttons_frame.pack(fill="x", padx=8, pady=8)
         
-        # Initialize variables
-        self.camera = None
-        self.controller = None
-        self.live_view = None
+        self.connect_button = ttk.Button(
+            self.connection_buttons_frame, 
+            text="Connect Camera", 
+            command=self.cmd_connect_camera, 
+            style='Accent.TButton'
+        )
+        self.connect_button.pack(fill="x", pady=(0, 5))
+        
+        self.disconnect_button = ttk.Button(
+            self.connection_buttons_frame, 
+            text="Disconnect", 
+            command=self.cmd_disconnect_camera, 
+            style='Danger.TButton',
+            state=tk.DISABLED
+        )
+        self.disconnect_button.pack(fill="x")
+        
+        # 3. Live View Controls
+        self.live_view_card = ttk.LabelFrame(self.controls_frame, text="Live View Control", style='Card.TLabelframe')
+        self.live_view_card.pack(fill="x", padx=10, pady=10)
+        
+        self.live_view_buttons_frame = ttk.Frame(self.live_view_card, style='Card.TFrame')
+        self.live_view_buttons_frame.pack(fill="x", padx=8, pady=8)
+        
+        self.start_lv_button = ttk.Button(
+            self.live_view_buttons_frame, 
+            text="Start Live View", 
+            command=self.cmd_start_live_view, 
+            style='TButton',
+            state=tk.DISABLED
+        )
+        self.start_lv_button.pack(fill="x", pady=(0, 5))
+        
+        self.stop_lv_button = ttk.Button(
+            self.live_view_buttons_frame, 
+            text="Stop Live View", 
+            command=self.cmd_stop_live_view, 
+            style='Danger.TButton',
+            state=tk.DISABLED
+        )
+        self.stop_lv_button.pack(fill="x")
+        
+        # Placeholder for future controls
+        self.future_controls_frame = ttk.Frame(self.controls_frame, style='TFrame')
+        self.future_controls_frame.pack(fill="both", expand=True)
+        
+        # Bottom section
+        self.bottom_frame = ttk.Frame(self.main_container, style='TFrame')
+        self.bottom_frame.pack(fill="x", padx=5, pady=(15, 5))
+        
+        # Logs
+        self.log_display = LogDisplay(self.bottom_frame)
+        self.log_display.frame.pack(fill="x", pady=5)
+        
+        # Footer with version info
+        self.footer_frame = ttk.Frame(self.main_container, style='TFrame')
+        self.footer_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.version_label = ttk.Label(
+            self.footer_frame, 
+            text="EDSDK Version 13.19.0 | v1.0.0", 
+            style='Status.TLabel'
+        )
+        self.version_label.pack(side=tk.RIGHT, padx=10)
+        
+        # Initialize camera connection and communication queues
+        self.camera_connection = None
+        self.camera_command_queue = queue.Queue()
+        self.camera_data_queue = queue.Queue()
+        
         self.syphon_output = None
-        self.is_running = False
-        self.frame_queue = queue.Queue(maxsize=1)
-        self.show_frame_id = None
-        self.target_fps = 30.0
+        self.is_running_live_view = False
+        self.current_image_ref = None
         self.frame_monitor = FrameRateMonitor()
+        self.reconnect_timer_id = None
+        self._data_queue_after_id = None
         
-        # Set up window close handler
+        # Window positioning and size
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Start status update
-        self.update_status()
-        
-        # Center the window on screen
         self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
+        width, height = 1280, 800
         x = (self.root.winfo_screenwidth() // 2) - (width // 2)
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
+        self.root.minsize(900, 600)
         
-        # Log initial status
-        self.log_display.log("Application initialized. Click 'Start Camera' to begin.")
+        # Start application
+        self.log_display.log("Application initialized. Click 'Connect Camera' to begin.")
+        self.update_gui_for_status()
+        self._start_data_queue_processing()
 
-    def start_camera(self):
-        """Initialize camera connection and start live preview."""
+    def _start_data_queue_processing(self):
+        if self._data_queue_after_id:
+            self.root.after_cancel(self._data_queue_after_id)
+        self._process_camera_data_queue()
+
+    def _process_camera_data_queue(self):
         try:
-            self.log_display.log("Initializing camera connection...")
-            
-            self.camera = None  # Initialize camera variable to avoid scope issues
-            try:
-                self.camera = CanonCamera()
-                self.camera.connect()
-            except CameraError as e:
-                # Handle specific camera errors with user-friendly messages
-                error_msg = str(e)
-                if "No cameras detected" in error_msg:
-                    self.error_var.set("No camera detected. Please check:")
-                    self.log_display.log("1. Camera is powered on")
-                    self.log_display.log("2. Camera is in photo mode (not playback/video)")
-                    self.log_display.log("3. USB connection is set to 'PTP' or 'PC Connect'")
-                    self.log_display.log("4. USB cable is securely connected")
-                    return
-                else:
-                    self.error_var.set(f"Camera Error: {error_msg}")
-                    self.log_display.log(error_msg)
-                    if e.recovery_hint:
-                        self.log_display.log(e.recovery_hint)
-                    return
-            
-            self.log_display.log("Connected to camera, waiting for device to stabilize...")
-            self.controller = CanonCameraController(self.camera) # Initialize controller
-            self.status_label.configure(text="Camera: Initializing...")
-            self.root.update()
-            
-            # Allow camera to stabilize before starting live view
-            self.root.after(1000)
-            
-            # Initialize LiveViewManager first
-            self.log_display.log("Initializing live view manager...")
-            self.live_view = LiveViewManager(self.controller, self.target_fps)
-            
-            self.log_display.log("Starting live view...")
-            try:
-                self.live_view.start()
-                self.is_running = True
-                if self.is_running: # Ensure live view started successfully
-                    try:
-                        # Get frame dimensions from canvas or a default, Syphon needs width/height
-                        # It's better if the camera can provide actual stream dimensions.
-                        # For now, let's use the canvas dimensions as a placeholder.
-                        # This might need adjustment if stream dimensions differ.
-                        width = self.canvas.winfo_width() 
-                        height = self.canvas.winfo_height()
-                        if width <= 1 or height <= 1: # Canvas might not be realized yet
-                            width, height = 1280, 720 # Fallback default
-                            self.log_display.log(f"Canvas not realized, using default {width}x{height} for Syphon.")
+            while not self.camera_data_queue.empty():
+                msg = self.camera_data_queue.get_nowait()
+                msg_type = msg.get("type")
+                payload = msg.get("payload", {})
 
-                        self.syphon_output = SyphonWebcamOutput() # Default server name "CanonCamSyphon"
-                        self.syphon_output.start(width, height)
-                        if self.syphon_output.is_running:
-                            self.log_display.log("Syphon output server started.")
-                        else:
-                            self.log_display.log("Syphon output server failed to start. Webcam functionality may not work.")
-                            # Optionally, set self.syphon_output to None if it failed
-                            if self.syphon_output and not self.syphon_output.is_running:
-                                 self.syphon_output = None
-                    except Exception as e:
-                        self.log_display.log(f"Error initializing Syphon output: {e}")
-                        if self.syphon_output: # Ensure cleanup if partial init
-                            self.syphon_output.stop()
-                        self.syphon_output = None
+                if msg_type == MSG_LOG:
+                    self.log_display.log(payload.get("message", "Log: Empty message"), timestamp=False)
+                elif msg_type == MSG_ERROR:
+                    self._handle_error_message(payload)
+                elif msg_type == MSG_CONNECTION_STATUS:
+                    self._handle_connection_status_message(payload)
+                elif msg_type == MSG_CAMERA_INFO:
+                    self._handle_camera_info_message(payload)
+                elif msg_type == MSG_STATUS_UPDATE:
+                    self._handle_status_update_message(payload)
+                elif msg_type == MSG_LIVE_FRAME:
+                    self._handle_live_frame_message(payload)
+                else:
+                    self.log_display.log(f"GUI received unknown message type: {msg_type}")
+                self.camera_data_queue.task_done()
+        except queue.Empty:
+            pass
+        except Exception as e:
+            self.log_display.log(f"Error processing data queue: {e}")
+        
+        self._data_queue_after_id = self.root.after(50, self._process_camera_data_queue)
+
+    def _handle_error_message(self, payload):
+        err_msg = payload.get("message", "Unknown error")
+        source = payload.get("source", "CameraWorker")
+        self.error_var.set(f"⚠️ Error: {err_msg[:100]}")
+        self.log_display.log(f"ERROR ({source}): {err_msg}")
+        if "No cameras detected" in err_msg or "Failed to get camera list" in err_msg:
+            self.update_gui_for_status("disconnected_error")
+            self._schedule_reconnect_attempt()
+
+    def _handle_connection_status_message(self, payload):
+        status = payload.get("status")
+        message = payload.get("message", "")
+        self.log_display.log(f"Connection Status: {status} - {message}")
+
+        if status == "sdk_loaded":
+            self.connection_var.set("SDK Loaded")
+        elif status == "sdk_initialized":
+            self.connection_var.set("Initializing...")
+        elif status == "connecting":
+            self.connection_var.set("Connecting...")
+        elif status == "connected":
+            self.connection_var.set("Connected")
+            self.update_gui_for_status("connected")
+            # Automatically request camera info and status after connection
+            self.camera_command_queue.put({"action": CMD_GET_CAMERA_INFO})
+            self.camera_command_queue.put({"action": CMD_GET_STATUS})
+        elif status == "disconnected":
+            self.connection_var.set("Disconnected")
+            self.update_gui_for_status("disconnected")
+            self.is_running_live_view = False
+        elif status == "shutdown_complete":
+            self.connection_var.set("Shutdown")
+            self.update_gui_for_status("shutdown")
+        else:
+            self.connection_var.set(message or status)
+        
+        self.status_icon_label.configure(foreground=gui_style.STATUS_COLORS.get(status, "grey"))
+
+    def _handle_camera_info_message(self, payload):
+        name = payload.get("product_name", "N/A")
+        serial = payload.get("serial_number", "N/A")
+        fw = payload.get("firmware_version", "N/A")
+        self.camera_info_var.set(f"Model: {name}\nSerial: {serial}\nFirmware: {fw}")
+
+    def _handle_status_update_message(self, payload):
+        battery = payload.get("battery_level", -1)
+        temp_code = payload.get("temperature_status", 0)
+        mode = payload.get("mode", -1)
+        live_view_status = payload.get("live_view_status")
+
+        if live_view_status == "active":
+            self.is_running_live_view = True
+        elif live_view_status == "inactive":
+            self.is_running_live_view = False
+        
+        self.update_gui_for_status("connected" if self.camera_connection else "disconnected")
+
+        temp_str = self.get_temp_status_str(temp_code)
+        battery_str = f"{battery}%" if battery != -1 else "N/A"
+        mode_str = f"Mode: {mode}"
+
+        fps_curr = self.frame_monitor.current_fps
+        fps_avg = self.frame_monitor.average_fps
+        
+        stats_text = f"Stream: {fps_curr:.1f} FPS (Avg: {fps_avg:.1f}) | Temp: {temp_str} | Battery: {battery_str} | {mode_str}"
+        self.stats_var.set(stats_text)
+
+        if temp_code & 0x0002:
+            self.error_var.set("⚠️ Warning: Camera temperature elevated")
+        elif not self.error_var.get().startswith("⚠️ Error"):
+             self.error_var.set("")
+
+    def _handle_live_frame_message(self, payload):
+        frame_bytes = payload.get("data")
+        if frame_bytes:
+            try:
+                nparr = np.frombuffer(frame_bytes, np.uint8)
+                frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame_bgr is not None:
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    
+                    # Syphon Output (if enabled)
+                    if self.syphon_output and self.syphon_output.is_running:
+                        try:
+                            self.syphon_output.send_frame(frame_rgb)
+                        except Exception as e:
+                            self.log_display.log(f"Syphon send error: {e}")
+                            
+                    pil_image = Image.fromarray(frame_rgb)
+                    self.show_frame_on_canvas(pil_image)
+                    self.frame_monitor.new_frame()
+                else:
+                    self.log_display.log("Failed to decode live frame.")
             except Exception as e:
-                error_msg = f"Error: Failed to start live view - {str(e)}"
-                self.error_var.set(error_msg)
-                self.log_display.log(error_msg)
-                if self.live_view:
-                    try:
-                        self.live_view.stop()
-                    except:
-                        pass
-                    self.live_view = None
-                if self.controller: # Clean up controller
-                    self.controller = None
-                if self.camera:
-                    try:
-                        self.camera.disconnect()
-                    except:
-                        pass
-                    self.camera = None
+                self.log_display.log(f"Error processing live frame: {e}")
+
+    def show_frame_on_canvas(self, image_pil):
+        try:
+            # Clear previous image
+            self.canvas.delete("all")
+            
+            canvas_w, canvas_h = self.canvas.winfo_width(), self.canvas.winfo_height()
+            if canvas_w <= 1 or canvas_h <= 1:
                 return
 
-            self.start_btn.configure(state=tk.DISABLED)
-            self.stop_btn.configure(state=tk.NORMAL)
-            self.stats_var.set("Initializing stats...")
-            
-            # Start frame capture thread
-            self.capture_thread = threading.Thread(target=self.capture_frames)
-            self.capture_thread.daemon = True
-            self.capture_thread.start()
-            
-            # Start displaying frames
-            self.show_frame()
-            
-        except Exception as e:
-            error_msg = f"Error: {str(e)}"
-            self.error_var.set(error_msg)
-            self.log_display.log(error_msg)
-            # Clean up any resources if initialization failed
-            if hasattr(self, 'camera') and self.camera:
-                try:
-                    self.camera.disconnect()
-                except:
-                    pass
-                self.camera = None
+            img_w, img_h = image_pil.size
+            if img_w == 0 or img_h == 0: 
+                return
 
-    def capture_frames(self):
-        """Continuously capture frames from the camera."""
-        while self.is_running:
-            try:
-                with self.live_view.frame_context() as frame_data:
-                    if frame_data:
-                        try:
-                            # Convert bytes to numpy array
-                            nparr = np.frombuffer(frame_data, np.uint8)
-                            # Decode image
-                            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            if frame is not None:
-                                # Convert BGR to RGB
-                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                if self.syphon_output and self.syphon_output.is_running:
-                                    try:
-                                        self.syphon_output.send_frame(frame_rgb)
-                                    except Exception as e:
-                                        self.log_display.log(f"Error sending frame to Syphon: {e}")
-                                # Put frame in queue
-                                if not self.frame_queue.full():
-                                    self.frame_queue.put(frame_rgb)
-                                    self.frame_monitor.update()
-                                    
-                            else:
-                                self.log_display.log("Failed to decode image data")
-                        except Exception as e:
-                            self.log_display.log(f"Frame processing error: {e}")
-                            continue
-            except Exception as e:
-                if self.is_running:
-                    self.log_display.log(f"Capture error: {e}")
-                    self.error_var.set(f"Capture error: {e}")
-
-    def show_frame(self):
-        """Display the most recent frame from the queue."""
-        try:
-            if not self.frame_queue.empty():
-                frame = self.frame_queue.get()
-                # Convert frame to PhotoImage
-                image = Image.fromarray(frame)
-                # Resize to fit canvas while maintaining aspect ratio
-                canvas_ratio = self.canvas.winfo_width() / self.canvas.winfo_height()
-                image_ratio = image.width / image.height
-                
-                if image_ratio > canvas_ratio:
-                    new_width = self.canvas.winfo_width()
-                    new_height = int(new_width / image_ratio)
-                else:
-                    new_height = self.canvas.winfo_height()
-                    new_width = int(new_height * image_ratio)
-                
-                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(image=image)
-                
-                # Keep a reference to prevent garbage collection
-                self.current_image = photo
-                
-                # Update canvas
-                self.canvas.create_image(
-                    self.canvas.winfo_width()//2,
-                    self.canvas.winfo_height()//2,
-                    image=photo,
-                    anchor=tk.CENTER
-                )
+            canvas_ratio = canvas_w / canvas_h
+            image_ratio = img_w / img_h
+            
+            if image_ratio > canvas_ratio:
+                new_width = canvas_w
+                new_height = int(new_width / image_ratio)
+            else:
+                new_height = canvas_h
+                new_width = int(new_height * image_ratio)
+            
+            resized_image = image_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            self.current_image_ref = ImageTk.PhotoImage(image=resized_image)
+            
+            # Center the image
+            x = (canvas_w - new_width) // 2
+            y = (canvas_h - new_height) // 2
+            self.canvas.create_image(x, y, image=self.current_image_ref, anchor=tk.NW)
         except Exception as e:
             self.log_display.log(f"Display error: {e}")
+
+    def update_gui_for_status(self, status_key=None):
+        connected = self.camera_connection and self.camera_connection.worker_thread and self.camera_connection.worker_thread.is_alive()
+
+        if status_key == "disconnected" or status_key == "shutdown" or status_key == "disconnected_error":
+            connected = False
+            self.is_running_live_view = False
+
+        # Update button states
+        self.connect_button.config(state=tk.NORMAL if not connected else tk.DISABLED)
+        self.disconnect_button.config(state=tk.NORMAL if connected else tk.DISABLED)
+        self.start_lv_button.config(state=tk.NORMAL if connected and not self.is_running_live_view else tk.DISABLED)
+        self.stop_lv_button.config(state=tk.NORMAL if connected and self.is_running_live_view else tk.DISABLED)
+
+        # Update display texts
+        if not connected:
+            self.camera_info_var.set("No Camera Connected")
+            self.stats_var.set("")
+            self.canvas.delete("all")
             
-        if self.is_running:
-            self.show_frame_id = self.root.after(10, self.show_frame)
-
-    def update_status(self):
-        """Update status display with current statistics."""
-        if self.is_running and self.controller:
-            try:
-                status = self.controller.get_status()
-                stats = (
-                    f"FPS: {self.frame_monitor.current_fps:.1f} "
-                    f"(Avg: {self.frame_monitor.average_fps:.1f}) | "
-                    f"Temp: {status.temperature_status:#x} | "
-                    f"Mode: {status.mode}"
+            # Display a message on the canvas
+            canvas_w, canvas_h = self.canvas.winfo_width(), self.canvas.winfo_height()
+            if canvas_w > 1 and canvas_h > 1:
+                self.canvas.create_text(
+                    canvas_w/2, canvas_h/2,
+                    text="No Camera Connected\nClick 'Connect Camera' to begin",
+                    fill=gui_style.COLORS['text_secondary'],
+                    font=('SF Pro Text', 16),
+                    justify=tk.CENTER
                 )
-                self.stats_var.set(stats)
-                
-                # Log warnings
-                if status.temperature_status & 0x0002:
-                    self.error_var.set("Warning: Camera temperature elevated")
-                    
-            except Exception as e:
-                self.error_var.set(f"Status Error: {e}")
-                
-        # Schedule next update
-        self.root.after(1000, self.update_status)
 
-    def stop_camera(self):
-        """Stop camera preview and clean up resources."""
-        # Set flags first to stop any ongoing operations
-        self.is_running = False
+    def cmd_connect_camera(self):
+        self.log_display.log("Connecting to camera...")
+        self.error_var.set("")
+        if not self.camera_connection or not (self.camera_connection.worker_thread and self.camera_connection.worker_thread.is_alive()):
+            self.camera_connection = CanonCameraConnection()
+            self.camera_connection.start_worker(self.camera_command_queue, self.camera_data_queue)
+            self.root.after(200, lambda: self.camera_command_queue.put({"action": CMD_CONNECT}))
+        else:
+             self.camera_command_queue.put({"action": CMD_CONNECT})
+        self.update_gui_for_status()
+
+    def cmd_disconnect_camera(self):
+        self.log_display.log("Disconnecting camera...")
+        if self.camera_connection:
+            self.camera_command_queue.put({"action": CMD_DISCONNECT})
+        self.update_gui_for_status("disconnected")
+
+    def cmd_start_live_view(self):
+        self.log_display.log("Starting live view...")
+        if self.camera_connection:
+            self.camera_command_queue.put({"action": CMD_START_LIVE_VIEW})
+
+    def cmd_stop_live_view(self):
+        self.log_display.log("Stopping live view...")
+        if self.camera_connection:
+            self.camera_command_queue.put({"action": CMD_STOP_LIVE_VIEW})
+
+    def _schedule_reconnect_attempt(self):
+        if self.reconnect_timer_id:
+            self.root.after_cancel(self.reconnect_timer_id)
+        self.log_display.log("Scheduling reconnect in 5 seconds...")
+        self.reconnect_timer_id = self.root.after(5000, self.cmd_connect_camera)
+
+    def get_temp_status_str(self, status_code):
+        if status_code == 0: return "Normal"
+        if status_code & 0x0002: return "⚠️ High"
+        if status_code & 0x0004: return "🔥 Critical"
+        return f"Unknown ({status_code:#x})"
+
+    def cleanup_resources(self):
+        self.log_display.log("Cleaning up resources...")
+        if self._data_queue_after_id:
+            self.root.after_cancel(self._data_queue_after_id)
+            self._data_queue_after_id = None
+        if self.reconnect_timer_id:
+            self.root.after_cancel(self.reconnect_timer_id)
+            self.reconnect_timer_id = None
+            
+        if self.camera_connection:
+            self.log_display.log("Stopping camera worker...")
+            self.camera_connection.stop_worker()
+            self.camera_connection = None
         
-        # Cancel any pending frame updates
-        if self.show_frame_id:
-            try:
-                self.root.after_cancel(self.show_frame_id)
-            except:
-                pass
-            self.show_frame_id = None
-        
-        # Stop live view manager first
-        if self.live_view:
-            try:
-                self.live_view.stop()
-            except Exception as e:
-                self.log_display.log(f"Error stopping live view: {e}")
-            self.live_view = None
-        
-        # Disconnect camera last    
-        if self.camera:
-            try:
-                self.camera.disconnect()
-            except Exception as e:
-                self.log_display.log(f"Error disconnecting camera: {e}")
-            self.camera = None
         if self.syphon_output:
             try:
                 self.syphon_output.stop()
-                self.log_display.log("Syphon output server stopped.")
+                self.log_display.log("Syphon output stopped.")
             except Exception as e:
-                self.log_display.log(f"Error stopping Syphon output: {e}")
+                self.log_display.log(f"Error stopping Syphon: {e}")
             self.syphon_output = None
-        self.controller = None # Clean up controller
         
-        self.start_btn.configure(state=tk.NORMAL)
-        self.stop_btn.configure(state=tk.DISABLED)
-        self.stats_var.set("")
-        self.error_var.set("")
-        self.canvas.delete("all")
-        self.log_display.log("Camera stopped and resources cleaned up")
+        self.is_running_live_view = False
+        self.update_gui_for_status("shutdown")
+        self.log_display.log("Cleanup complete.")
 
     def on_closing(self):
-        """Handle window close event."""
-        self.stop_camera()
+        self.log_display.log("Shutting down application...")
+        self.cleanup_resources()
         self.root.destroy()
 
 def create_app():
-    """Create and configure the main application window."""
     root = tk.Tk()
-    return CameraApp(root)
+    gui_style.setup_styles(root)
+    app = CameraApp(root)
+    return app
+
+# if __name__ == '__main__':
+#     root = tk.Tk()
+#     gui_style.setup_styles(root)
+#     app = CameraApp(root)
+#     root.mainloop()
