@@ -49,6 +49,24 @@ kEdsErr_BatteryLow = 49
 kEdsErr_NotReady = 41
 kEdsErr_UnsupportedCommand = 36110  # Command not supported
 
+# EDSDK Event Codes
+# Object Events (Examples, add more as needed)
+kEdsObjectEvent_DirItemRequestTransfer = 0x00000208,
+kEdsObjectEvent_DirItemCreated = 0x00000204,
+kEdsObjectEvent_VolumeInfoChanged = 0x00000202,
+
+# Property Events
+kEdsPropertyEvent_PropertyChanged = 0x00000103,
+kEdsPropertyEvent_PropertyDescChanged = 0x00000104,
+
+# State Events (Examples, add more as needed)
+kEdsStateEvent_Shutdown = 0x00000301,
+kEdsStateEvent_JobStatusChanged = 0x00000302,
+kEdsStateEvent_WillSoonShutDown = 0x00000303,
+kEdsStateEvent_ShutDownTimerUpdate = 0x00000304,
+kEdsStateEvent_CaptureError = 0x00000305,
+kEdsStateEvent_InternalError = 0x00000306,
+
 # EVF Recovery Delays (seconds)
 RECOVERY_DELAY_SHORT = 0.1
 RECOVERY_DELAY_MEDIUM = 0.2

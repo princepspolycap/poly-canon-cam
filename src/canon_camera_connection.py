@@ -8,7 +8,12 @@ from src.camera_constants import (
     CMD_CONNECT, CMD_DISCONNECT, CMD_START_LIVE_VIEW, CMD_STOP_LIVE_VIEW,
     CMD_CAPTURE_FRAME, CMD_GET_CAMERA_INFO, CMD_GET_STATUS, CMD_SHUTDOWN,
     MSG_STATUS_UPDATE, MSG_ERROR, MSG_CAMERA_INFO, MSG_LIVE_FRAME,
-    MSG_CONNECTION_STATUS, MSG_LOG
+    MSG_CONNECTION_STATUS, MSG_LOG,
+    # Property and State Event constants
+    kEdsPropertyEvent_PropertyChanged, kEdsPropertyEvent_PropertyDescChanged,
+    kEdsStateEvent_Shutdown, kEdsStateEvent_JobStatusChanged,
+    kEdsStateEvent_WillSoonShutDown, kEdsStateEvent_ShutDownTimerUpdate,
+    kEdsStateEvent_CaptureError, kEdsStateEvent_InternalError
 )
 from src import camera_utils # For cleanup utilities
 
@@ -32,6 +37,11 @@ class CanonCameraConnection:
         self.status = CameraStatus() # Managed by worker thread
         self._event_lock = threading.Lock()
         self._state_handler = None # To prevent garbage collection
+        self._property_handler = None # To prevent garbage collection
+        
+        # Event for signaling when property changes are detected
+        self._evf_output_device_changed_event = threading.Event()
+        self._property_event_data = {"property_id": None, "event_type": None}
 
         self.command_queue = None
         self.data_queue = None
@@ -79,16 +89,42 @@ class CanonCameraConnection:
             self._send_error("EDSDK not loaded, cannot initialize.", source_func="_initialize_sdk")
             return False
 
+        # Reset property change event flag at initialization
+        self._evf_output_device_changed_event.clear()
+
+        # Define state event handler callback
         EdsStateEventHandler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
         @EdsStateEventHandler
         def camera_state_callback(event, param, context):
             # This callback runs in an EDSDK internal thread.
-            # For now, it's a no-op. If it needs to interact with Python state
-            # or send messages, it must do so in a thread-safe manner,
-            # potentially by putting items onto a queue processed by the worker.
-            # print(f"Camera State Event: {event}, Param: {param}")
+            # Handle state events if needed in the future
             return EDS_ERR_OK
         self._state_handler = camera_state_callback # Keep a reference
+
+        # Define property event handler callback
+        EdsPropertyEventHandler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+        @EdsPropertyEventHandler
+        def camera_property_callback(event, property_id, param, context):
+            # This callback runs in an EDSDK internal thread
+            try:
+                # Check if this is a property change event
+                if event == kEdsPropertyEvent_PropertyChanged:
+                    # We need to track property_id to determine which property changed
+                    if property_id == kEdsPropID_Evf_OutputDevice:
+                        # Signal the event when Evf_OutputDevice property changes
+                        # This allows the main thread to know when the camera has processed the change
+                        connection = ctypes.cast(context, ctypes.py_object).value
+                        if connection and hasattr(connection, '_evf_output_device_changed_event'):
+                            connection._property_event_data["property_id"] = property_id
+                            connection._property_event_data["event_type"] = event
+                            connection._evf_output_device_changed_event.set()
+                            # Can't use send_log directly from callback thread
+                            # Must use thread-safe methods or flags
+            except Exception:
+                # Callbacks should never raise exceptions back to the SDK
+                pass
+            return EDS_ERR_OK
+        self._property_handler = camera_property_callback  # Keep a reference
 
         with self._event_lock:
             err = self.edsdk.EdsInitializeSDK()
@@ -96,11 +132,16 @@ class CanonCameraConnection:
                 self._send_error(f"Failed to initialize SDK", code=err, source_func="_initialize_sdk")
                 return False
 
-            # Set state event handler (optional but good practice)
-            # Passing None for context as this callback is simple.
+            # Set state event handler
             err = self.edsdk.EdsSetCameraStateEventHandler(None, 0, self._state_handler, None)
             if err != EDS_ERR_OK:
                 self._send_log(f"Warning: Failed to set state event handler: {err}")
+                
+            # Set property event handler - use 'self' as context so callback can access instance variables
+            context_ptr = ctypes.py_object(self)
+            err = self.edsdk.EdsSetPropertyEventHandler(None, 0, self._property_handler, context_ptr)
+            if err != EDS_ERR_OK:
+                self._send_log(f"Warning: Failed to set property event handler: {err}")
             
             # Process one event immediately after SDK initialization (critical for macOS)
             self._send_log("Processing one event immediately after SDK initialization...")
@@ -312,44 +353,246 @@ class CanonCameraConnection:
 
         try:
             self._send_log("Attempting to start live view...")
-            # Set EVF output device to PC
-            self._send_log("Setting EVF output device to PC...")
-            output_device = ctypes.c_uint32(kEdsEvfOutputDevice_PC)
-            with self._event_lock:
-                err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(output_device), ctypes.byref(output_device))
-            
-            if err != EDS_ERR_OK:
-                self._send_error(f"Failed to set EVF output device to PC (Error: {err}).", code=err, source_func="_handle_start_live_view_command")
-                return
-            self._send_log(f"Successfully set EVF output device to PC (Result: {err}).")
 
-            # Enable EVF mode
-            self._send_log("Enabling EVF mode...")
-            evf_mode = ctypes.c_uint32(kEdsEvfMode_Enable)
+            # Get the original EVF output device value for potential revert
+            self._send_log("Reading original EVF output device value from camera for potential revert...")
+            original_evf_output_device_for_revert = ctypes.c_uint32()
+            err_get_orig_device = EDS_ERR_OK # Assume OK for now
             with self._event_lock:
-                err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_Mode, 0, ctypes.sizeof(evf_mode), ctypes.byref(evf_mode))
-            
-            if err != EDS_ERR_OK:
-                self._send_error(f"Failed to enable EVF mode (Error: {err}).", code=err, source_func="_handle_start_live_view_command")
-                # Attempt to revert output device if EVF mode fails
-                self._send_log("Attempting to revert EVF output device due to EVF mode failure...")
-                output_device.value = 0 # Typically 0 is Camera LCD
-                with self._event_lock:
-                    revert_err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(output_device), ctypes.byref(output_device))
-                if revert_err != EDS_ERR_OK:
-                    self._send_log(f"Warning: Failed to revert EVF output device (Error: {revert_err}).")
+                if self.camera and self.session_open and self.edsdk: # Check before SDK call
+                    err_get_orig_device = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(original_evf_output_device_for_revert), ctypes.byref(original_evf_output_device_for_revert))
                 else:
-                    self._send_log("Successfully reverted EVF output device.")
+                    err_get_orig_device = kEdsErr_DeviceNotFound # Simulate error if no camera/session
+
+            original_device_to_revert_val = 0 # Default to Camera LCD
+            if err_get_orig_device == EDS_ERR_OK:
+                self._send_log(f"Original EVF output device value (for revert): {original_evf_output_device_for_revert.value}")
+                original_device_to_revert_val = original_evf_output_device_for_revert.value
+            else:
+                self._send_log(f"Warning: Failed to get original EVF output device (Error: {err_get_orig_device}). Will revert to 0 (Camera LCD) on failure.")
+
+            # Set EVF output device to PC by ORing with the current value
+            self._send_log("Reading current EVF output device value from camera for ORing...")
+            current_device_val_for_or = ctypes.c_uint32()
+            err_get_current_for_or = EDS_ERR_OK
+            with self._event_lock:
+                if self.camera and self.session_open and self.edsdk:
+                    err_get_current_for_or = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(current_device_val_for_or), ctypes.byref(current_device_val_for_or))
+                else:
+                    err_get_current_for_or = kEdsErr_DeviceNotFound
+
+            if err_get_current_for_or != EDS_ERR_OK:
+                self._send_error(f"Failed to read current EVF output device before ORing (Error: {err_get_current_for_or}). Aborting live view start.", code=err_get_current_for_or, source_func="_handle_start_live_view_command")
+                # No revert needed here as we haven't changed it yet, and original_device_to_revert_val is what it was.
                 return
-            self._send_log(f"Successfully enabled EVF mode (Result: {err}).")
+            self._send_log(f"Current EVF output device value from camera (for ORing): {current_device_val_for_or.value}")
+
+            new_output_device_val = current_device_val_for_or.value | kEdsEvfOutputDevice_PC
+            self._send_log(f"Setting EVF output device to: {new_output_device_val} (current ORed with PC value {kEdsEvfOutputDevice_PC})")
+            output_device_to_set = ctypes.c_uint32(new_output_device_val)
             
-            self.live_view_active = True
-            self._send_log("Live view started successfully (live_view_active set to True).")
-            self._send_data(MSG_STATUS_UPDATE, {"live_view_status": "active"})
+            err_set_prop = EDS_ERR_OK
+            with self._event_lock:
+                if self.camera and self.session_open and self.edsdk:
+                    err_set_prop = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(output_device_to_set), ctypes.byref(output_device_to_set))
+                else:
+                    err_set_prop = kEdsErr_DeviceNotFound
+            
+            if err_set_prop != EDS_ERR_OK:
+                self._send_error(f"Failed to set ORed EVF output device (Error: {err_set_prop}).", code=err_set_prop, source_func="_handle_start_live_view_command")
+                self._revert_live_view_settings_on_failure(original_device_to_revert_val)
+                return
+            self._send_log(f"Successfully set ORed EVF output device (Result: {err_set_prop}).")
+
+            # Clear the property change event flag before setting the property
+            self._evf_output_device_changed_event.clear()
+            self._property_event_data["property_id"] = None
+            self._property_event_data["event_type"] = None
+            
+            self._send_log("Property change event flag cleared. Waiting for Evf_OutputDevice property change event...")
+            
+            # Process events to detect property change notification
+            max_wait_time = 3.0  # Maximum wait time in seconds
+            start_wait_time = time.time()
+            property_change_detected = False
+            
+            # Wait for property change event or timeout
+            while time.time() - start_wait_time < max_wait_time:
+                # Process events to receive notifications
+                self._process_events()
+                
+                # Check if our property change event was set by the callback
+                if self._evf_output_device_changed_event.is_set():
+                    property_change_detected = True
+                    self._send_log(f"Evf_OutputDevice property change event detected! Property ID: {self._property_event_data['property_id']}, Event Type: {self._property_event_data['event_type']}")
+                    break
+                
+                time.sleep(0.05)  # Small sleep to prevent busy waiting
+            
+            if property_change_detected:
+                self._send_log("Successfully detected property change event for Evf_OutputDevice.")
+            else:
+                self._send_log("Warning: Timed out waiting for Evf_OutputDevice property change event. Proceeding with caution.")
+
+            # Read back EVF output device property to confirm change
+            self._send_log("Reading back EVF output device property to confirm change...")
+            current_output_device_readback = ctypes.c_uint32()
+            with self._event_lock:
+                err_read_output = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(current_output_device_readback), ctypes.byref(current_output_device_readback))
+            
+            if err_read_output == EDS_ERR_OK:
+                self._send_log(f"Confirmed EVF output device is: {current_output_device_readback.value} (PC bit is {kEdsEvfOutputDevice_PC})")
+                if not (current_output_device_readback.value & kEdsEvfOutputDevice_PC):
+                    self._send_error(f"EVF output device did not have PC bit set. Value: {current_output_device_readback.value}, PC bit: {kEdsEvfOutputDevice_PC}", 
+                                    source_func="_handle_start_live_view_command")
+                    # If the PC bit isn't set, attempting to enable EVF mode is likely to fail
+                    self._revert_live_view_settings_on_failure(original_device_to_revert_val)
+                    return
+                else:
+                    self._send_log(f"EVF output device correctly has PC bit set ({current_output_device_readback.value}).")
+            else:
+                self._send_log(f"Warning: Failed to read back EVF output device property (Error: {err_read_output}). Proceeding with caution.")
+
+            # Log current camera mode (optional, but can be useful for debugging)
+            current_cam_status = self._get_status_internal()
+            if current_cam_status and hasattr(current_cam_status, 'mode'):
+                self._send_log(f"Camera AE Mode before attempting live view download: {current_cam_status.mode}")
+            else:
+                self._send_log("Could not determine camera AE mode before attempting live view download.")
+
+            # Per EDSDK Sample, kEdsPropID_Evf_Mode is NOT explicitly set.
+            # Instead, after setting kEdsPropID_Evf_OutputDevice, we process events
+            # and then attempt to download the EVF image.
+            self._send_log("Skipping explicit kEdsPropID_Evf_Mode set, aligning with EDSDK sample.")
+
+            # Enhanced event processing after setting Evf_OutputDevice - wait for property change notification
+            self._send_log("Enhanced event processing after setting Evf_OutputDevice (up to 2.0s)...")
+            start_event_processing_time = time.time()
+            event_loops = 0
+            
+            # Poll events for up to 2 seconds, waiting for the camera to process the output device change
+            # and issue property change notifications.
+            while time.time() - start_event_processing_time < 2.0:
+                self._process_events()
+                event_loops += 1
+                time.sleep(0.05) # Small sleep between event polls
+            
+            self._send_log(f"Completed {event_loops} event processing loops after setting Evf_OutputDevice.")
+            
+            # Proceed to attempt download. The camera should be ready if Evf_OutputDevice was set correctly
+            # and property change events have been processed.
+
+            # Attempt a "priming" download with multiple retries for OBJECT_NOTREADY
+            self._send_log("Attempting a priming download of the first EVF image with retries...")
+            priming_stream = ctypes.c_void_p()
+            max_retries = 10  # Maximum number of download attempts
+            retry_delay = 0.2  # Delay between retries in seconds
+            download_success = False
+            
+            try:
+                with self._event_lock:
+                    err_create_stream = self.edsdk.EdsCreateMemoryStream(0, ctypes.byref(priming_stream))
+                if err_create_stream != EDS_ERR_OK:
+                    self._send_error(f"Priming: Failed to create memory stream (Error: {err_create_stream}). Aborting live view start.", code=err_create_stream, source_func="_handle_start_live_view_command")
+                    self._revert_live_view_settings_on_failure(original_device_to_revert_val)
+                    return
+                
+                # Retry loop for handling EDS_ERR_OBJECT_NOTREADY
+                for retry_count in range(max_retries):
+                    # Process events before each download attempt
+                    self._process_events()
+                    
+                    # Try to download the EVF image
+                    with self._event_lock:
+                        err_download_prime = self.edsdk.EdsDownloadEvfImage(self.camera, priming_stream)
+                    
+                    if err_download_prime == EDS_ERR_OK:
+                        # Success!
+                        self._send_log(f"Priming download successful on attempt {retry_count + 1}. First EVF image obtained.")
+                        download_success = True
+                        break
+                    elif err_download_prime == 0x00008D04:  # EDS_ERR_OBJECT_NOTREADY
+                        # This is expected if the camera isn't ready yet
+                        self._send_log(f"EVF image not ready on attempt {retry_count + 1} (Error: 0x8D04). Waiting and retrying...")
+                        time.sleep(retry_delay)  # Wait before next attempt
+                        
+                        # Increase delay slightly for each retry to give camera more time
+                        retry_delay += 0.1
+                        
+                        # Continue to next retry
+                        continue
+                    else:
+                        # Some other error occurred
+                        self._send_error(f"Priming: Failed to download EVF image (Error: {err_download_prime}) on attempt {retry_count + 1}. Aborting live view start.", 
+                                       code=err_download_prime, source_func="_handle_start_live_view_command")
+                        break
+                
+                # Check if we ever succeeded
+                if not download_success:
+                    self._send_log(f"Priming: Failed to download EVF image after {max_retries} attempts. Aborting live view start.")
+                    self._revert_live_view_settings_on_failure(original_device_to_revert_val)
+                    return
+                
+                # We successfully downloaded an image, but don't need to process it
+            finally:
+                if priming_stream: # Ensure stream is released even if download part failed after creation
+                    with self._event_lock:
+                        release_err = self.edsdk.EdsRelease(priming_stream)
+                    if release_err != EDS_ERR_OK:
+                        self._send_log(f"Priming: Warning, failed to release priming stream (Error: {release_err})")
+            
+            # If priming was successful, proceed to activate live view for the loop
+            if download_success: # Check if priming download was actually successful
+                self.live_view_active = True
+                self._send_log("Live view started successfully (live_view_active set to True) after priming.")
+                self._send_data(MSG_STATUS_UPDATE, {"live_view_status": "active"})
+            # If download_success is false, the revert and return path is already handled within the priming block.
 
         except Exception as e:
-            self.live_view_active = False
+            self.live_view_active = False # Ensure it's off if any exception occurs
             self._send_error(f"Exception starting live view: {e}", source_func="_handle_start_live_view_command")
+            # Ensure original_device_to_revert_val is defined in this scope for the except block
+            # It should be, as it's defined at the beginning of the try block.
+            self._revert_live_view_settings_on_failure(original_device_to_revert_val) # Attempt cleanup
+
+    def _revert_live_view_settings_on_failure(self, original_evf_output_device_target=0):
+        """
+        Helper to attempt reverting EVF mode and output device on failure.
+        :param original_evf_output_device_target: The EVF output device value to revert to.
+                                                 Defaults to 0 (typically Camera LCD).
+        """
+        self._send_log(f"Attempting to revert live view settings. Target EVF output device: {original_evf_output_device_target}")
+        if not self.camera or not self.session_open or not self.edsdk:
+            self._send_log("Cannot revert live view settings: No camera, session, or SDK.")
+            return
+
+        try:
+            # Disable EVF mode
+            self._send_log("Reverting: Disabling EVF mode...")
+            evf_mode_off = ctypes.c_uint32(0) # 0 to disable
+            err_mode_off = EDS_ERR_OK
+            with self._event_lock:
+                err_mode_off = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_Mode, 0, ctypes.sizeof(evf_mode_off), ctypes.byref(evf_mode_off))
+            if err_mode_off != EDS_ERR_OK:
+                self._send_log(f"Warning: Failed to disable EVF mode during revert (Error: {err_mode_off}).")
+            else:
+                self._send_log("Reverting: EVF mode disabled.")
+            
+            # Revert EVF output device to the original_evf_output_device_target
+            self._send_log(f"Reverting: Setting EVF output device back to {original_evf_output_device_target}...")
+            output_device_revert_val = ctypes.c_uint32(original_evf_output_device_target)
+            err_revert_device = EDS_ERR_OK
+            with self._event_lock:
+                err_revert_device = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(output_device_revert_val), ctypes.byref(output_device_revert_val))
+            if err_revert_device != EDS_ERR_OK:
+                self._send_log(f"Warning: Failed to revert EVF output device to {original_evf_output_device_target} (Error: {err_revert_device}).")
+            else:
+                self._send_log(f"Reverting: EVF output device set to {original_evf_output_device_target}.")
+            
+            self._send_log("Live view settings revert attempt finished.")
+        except Exception as ex:
+            self._send_error(f"Exception during live view settings revert: {ex}", source_func="_revert_live_view_settings_on_failure")
+
 
     def _handle_stop_live_view_command(self):
         if not self.camera or not self.session_open:

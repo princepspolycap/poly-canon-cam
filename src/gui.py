@@ -251,6 +251,7 @@ class CameraApp:
         self.frame_monitor = FrameRateMonitor()
         self.reconnect_timer_id = None
         self._data_queue_after_id = None
+        self.is_connecting = False # Flag to track connection attempt - INITIALIZE EARLIER
         
         # Window positioning and size
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -265,6 +266,8 @@ class CameraApp:
         self.log_display.log("Application initialized. Click 'Connect Camera' to begin.")
         self.update_gui_for_status()
         self._start_data_queue_processing()
+        # self.is_connecting = False # Moved earlier
+
 
     def _start_data_queue_processing(self):
         if self._data_queue_after_id:
@@ -306,37 +309,60 @@ class CameraApp:
         self.error_var.set(f"⚠️ Error: {err_msg[:100]}")
         self.log_display.log(f"ERROR ({source}): {err_msg}")
         if "No cameras detected" in err_msg or "Failed to get camera list" in err_msg:
-            self.update_gui_for_status("disconnected_error")
-            self._schedule_reconnect_attempt()
+            if self.is_connecting: # Only schedule reconnect if it was part of an active attempt
+                self._schedule_reconnect_attempt()
+            else: # If not actively connecting (e.g. spontaneous error), just update UI
+                self.update_gui_for_status("disconnected_error")
+
 
     def _handle_connection_status_message(self, payload):
         status = payload.get("status")
         message = payload.get("message", "")
         self.log_display.log(f"Connection Status: {status} - {message}")
 
+        current_connection_state = "disconnected"
+
         if status == "sdk_loaded":
             self.connection_var.set("SDK Loaded")
+            current_connection_state = "sdk_loaded"
         elif status == "sdk_initialized":
             self.connection_var.set("Initializing...")
-        elif status == "connecting":
+            current_connection_state = "sdk_initialized"
+        elif status == "connecting": # This status might be set by GUI, not worker
             self.connection_var.set("Connecting...")
+            current_connection_state = "connecting"
+            self.is_connecting = True
         elif status == "connected":
             self.connection_var.set("Connected")
-            self.update_gui_for_status("connected")
+            if self.reconnect_timer_id: # Clear reconnect timer on successful connection
+                self.root.after_cancel(self.reconnect_timer_id)
+                self.reconnect_timer_id = None
+            self.is_connecting = False
+            current_connection_state = "connected"
             # Automatically request camera info and status after connection
             self.camera_command_queue.put({"action": CMD_GET_CAMERA_INFO})
             self.camera_command_queue.put({"action": CMD_GET_STATUS})
-        elif status == "disconnected":
-            self.connection_var.set("Disconnected")
-            self.update_gui_for_status("disconnected")
+        elif status == "disconnected" or status == "disconnected_error":
+            self.connection_var.set("Disconnected" if status == "disconnected" else "Connection Error")
             self.is_running_live_view = False
+            self.is_connecting = False # No longer actively trying if fully disconnected
+            current_connection_state = status # "disconnected" or "disconnected_error"
         elif status == "shutdown_complete":
             self.connection_var.set("Shutdown")
-            self.update_gui_for_status("shutdown")
+            self.is_running_live_view = False
+            self.is_connecting = False
+            current_connection_state = "shutdown"
         else:
             self.connection_var.set(message or status)
-        
-        self.status_icon_label.configure(foreground=gui_style.STATUS_COLORS.get(status, "grey"))
+            # Infer state if possible, otherwise default to disconnected
+            if "fail" in status.lower() or "error" in status.lower():
+                current_connection_state = "disconnected_error"
+            else:
+                current_connection_state = "disconnected" # Default for unknown
+
+        self.update_gui_for_status(current_connection_state)
+        self.status_icon_label.configure(foreground=gui_style.STATUS_COLORS.get(status, gui_style.STATUS_COLORS['disconnected']))
+
 
     def _handle_camera_info_message(self, payload):
         name = payload.get("product_name", "N/A")
@@ -437,10 +463,17 @@ class CameraApp:
             self.is_running_live_view = False
 
         # Update button states
-        self.connect_button.config(state=tk.NORMAL if not connected else tk.DISABLED)
-        self.disconnect_button.config(state=tk.NORMAL if connected else tk.DISABLED)
-        self.start_lv_button.config(state=tk.NORMAL if connected and not self.is_running_live_view else tk.DISABLED)
-        self.stop_lv_button.config(state=tk.NORMAL if connected and self.is_running_live_view else tk.DISABLED)
+        can_connect = not connected and not self.is_connecting
+        self.connect_button.config(state=tk.NORMAL if can_connect else tk.DISABLED)
+        
+        can_disconnect = connected # Can always try to disconnect if worker thinks it's connected
+        self.disconnect_button.config(state=tk.NORMAL if can_disconnect else tk.DISABLED)
+
+        can_start_lv = connected and not self.is_running_live_view
+        self.start_lv_button.config(state=tk.NORMAL if can_start_lv else tk.DISABLED)
+
+        can_stop_lv = connected and self.is_running_live_view
+        self.stop_lv_button.config(state=tk.NORMAL if can_stop_lv else tk.DISABLED)
 
         # Update display texts
         if not connected:
@@ -460,21 +493,44 @@ class CameraApp:
                 )
 
     def cmd_connect_camera(self):
+        if self.is_connecting and not self.reconnect_timer_id: # Already trying, not a scheduled retry
+            self.log_display.log("Connection attempt already in progress.")
+            return
+
+        if self.reconnect_timer_id: # If a reconnect was scheduled, cancel it for this manual attempt
+            self.root.after_cancel(self.reconnect_timer_id)
+            self.reconnect_timer_id = None
+            self.log_display.log("Cancelled scheduled reconnect attempt due to manual connect.")
+
         self.log_display.log("Connecting to camera...")
         self.error_var.set("")
+        self.is_connecting = True # Set flag
+        self.update_gui_for_status("connecting") # Update button states immediately
+
         if not self.camera_connection or not (self.camera_connection.worker_thread and self.camera_connection.worker_thread.is_alive()):
+            self.log_display.log("No active camera worker, creating new one.")
             self.camera_connection = CanonCameraConnection()
             self.camera_connection.start_worker(self.camera_command_queue, self.camera_data_queue)
+            # Give worker a moment to start before sending command
             self.root.after(200, lambda: self.camera_command_queue.put({"action": CMD_CONNECT}))
         else:
-             self.camera_command_queue.put({"action": CMD_CONNECT})
-        self.update_gui_for_status()
+            self.log_display.log("Existing camera worker found, sending connect command.")
+            self.camera_command_queue.put({"action": CMD_CONNECT})
+        # self.update_gui_for_status() # Already called with "connecting"
 
     def cmd_disconnect_camera(self):
         self.log_display.log("Disconnecting camera...")
+        if self.reconnect_timer_id: # Cancel any pending reconnect if user disconnects
+            self.root.after_cancel(self.reconnect_timer_id)
+            self.reconnect_timer_id = None
+            self.log_display.log("Cancelled scheduled reconnect attempt due to manual disconnect.")
+        
+        self.is_connecting = False # No longer trying to connect
+
         if self.camera_connection:
             self.camera_command_queue.put({"action": CMD_DISCONNECT})
-        self.update_gui_for_status("disconnected")
+        # GUI will update to "disconnected" via _handle_connection_status_message
+        # self.update_gui_for_status("disconnected") # Avoid race condition, let worker confirm
 
     def cmd_start_live_view(self):
         self.log_display.log("Starting live view...")
