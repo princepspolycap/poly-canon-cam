@@ -1,11 +1,21 @@
-import syphon
-import numpy as np
-from syphon.utils.numpy import copy_image_to_mtl_texture
-# It's possible create_mtl_texture might be needed from syphon.utils.raw depending on how texture is managed per frame
-# from syphon.utils.raw import create_mtl_texture 
+try:
+    import syphon
+    import numpy as np
+    from syphon.utils.numpy import copy_image_to_mtl_texture
+    SYPHON_AVAILABLE = True
+    # It's possible create_mtl_texture might be needed from syphon.utils.raw depending on how texture is managed per frame
+    # from syphon.utils.raw import create_mtl_texture
+except ImportError:
+    SYPHON_AVAILABLE = False
+    syphon = None
+    np = None
+    print("Warning: Syphon not available. Virtual webcam functionality disabled.") 
 
 class SyphonWebcamOutput:
     def __init__(self, server_name="CanonCamSyphon"):
+        if not SYPHON_AVAILABLE:
+            print(f"Warning: Syphon not available. {server_name} webcam output disabled.")
+            
         self.server_name = server_name
         self.server = None
         self.texture = None
@@ -15,6 +25,10 @@ class SyphonWebcamOutput:
         self.height = 0
 
     def start(self, width, height):
+        if not SYPHON_AVAILABLE:
+            print("Syphon not available - virtual webcam start skipped")
+            return
+            
         if self.is_running:
             print("Syphon server already running.")
             return
@@ -23,6 +37,10 @@ class SyphonWebcamOutput:
         self.height = height
         
         try:
+            if not SYPHON_AVAILABLE:
+                print("Syphon not available - cannot start server")
+                return
+                
             self.server = syphon.SyphonMetalServer(self.server_name)
             # Texture creation might be better here if size is fixed,
             # or it might be recreated if frame size can change.
@@ -36,7 +54,10 @@ class SyphonWebcamOutput:
             self.server = None
             self.is_running = False
 
-    def send_frame(self, frame_rgb: np.ndarray):
+    def send_frame(self, frame_rgb):
+        if not SYPHON_AVAILABLE:
+            return
+            
         if not self.is_running or self.server is None:
             return
 
@@ -81,6 +102,9 @@ class SyphonWebcamOutput:
             print(f"Error sending frame to Syphon: {e}")
 
     def stop(self):
+        if not SYPHON_AVAILABLE:
+            return
+            
         if self.server:
             try:
                 self.server.stop()
@@ -93,21 +117,26 @@ class SyphonWebcamOutput:
 
 if __name__ == '__main__':
     # Basic test usage
-    syphon_output = SyphonWebcamOutput("TestSyphon")
-    syphon_output.start(640, 480)
-    
-    if syphon_output.is_running:
-        # Create a dummy RGBA frame (e.g., red)
-        dummy_frame_rgba = np.zeros((480, 640, 4), dtype=np.uint8)
-        dummy_frame_rgba[:, :, 0] = 255  # Red channel
-        dummy_frame_rgba[:, :, 3] = 255  # Alpha channel
+    if SYPHON_AVAILABLE:
+        syphon_output = SyphonWebcamOutput("TestSyphon")
+        syphon_output.start(640, 480)
         
-        syphon_output.send_frame(dummy_frame_rgba)
-        print("Sent dummy frame.")
-        
-        import time
-        time.sleep(2) # Keep server alive for a bit for OBS to pick up
-        
-        syphon_output.stop()
+        if syphon_output.is_running:
+            # Create a dummy RGBA frame (e.g., red)
+            import numpy as np
+            dummy_frame_rgba = np.zeros((480, 640, 4), dtype=np.uint8)
+            dummy_frame_rgba[:, :, 0] = 255  # Red channel
+            dummy_frame_rgba[:, :, 3] = 255  # Alpha channel
+            
+            syphon_output.send_frame(dummy_frame_rgba)
+            print("Sent dummy frame.")
+            
+            import time
+            time.sleep(2)
+            import time
+            time.sleep(2)
+            syphon_output.stop()
+        else:
+            print("Failed to start Syphon server.")
     else:
-        print("Syphon test server failed to start.")
+        print("Syphon not available - skipping test")

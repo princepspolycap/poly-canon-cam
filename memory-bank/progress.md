@@ -2,40 +2,70 @@
 
 ## ✅ Completed
 
-- Camera connection and session management.
-- Basic camera properties retrieval.
-- Initial implementation of live view initialization.
-- **Corrected `kEdsPropID_Evf_OutputDevice` setting**: Now uses bitwise OR and validates the PC bit correctly (value 3 is accepted).
-- **Aligned with EDSDK Sample for `kEdsPropID_Evf_Mode`**: Removed the explicit setting of `kEdsPropID_Evf_Mode`. This resolved an Error 129 that was occurring immediately after setting `Evf_OutputDevice`.
-- Maintained retry mechanism for `EDS_ERR_OBJECT_NOTREADY` during `EdsDownloadEvfImage`.
+- **MAJOR BREAKTHROUGH**: ✅ **EDSDK Loading Issue Resolved**
+  - **Root Cause**: macOS Gatekeeper was blocking EDSDK framework with "library load disallowed by system policy"
+  - **Solution**: Removed quarantine attributes from EDSDK framework
+  - **Result**: EDSDK now loads, initializes, and operates successfully
 
-## ⏳ In Progress
+- **SECOND BREAKTHROUGH**: ✅ **Camera Detection Issue Resolved**
+  - **Root Cause**: Insufficient event processing after EDSDK initialization in main application
+  - **Solution**: Enhanced event processing with 3-second intensive pattern (50ms intervals)
+  - **Implementation**: Added retry logic with 10 attempts for reliable camera detection
+  - **Result**: Test consistently detects camera on first attempt, main application updated
 
-- **Resolving Error 97 (`EDS_ERR_OBJECT_NOTREADY`)**: This is now the primary blocker. It occurs during the priming `EdsDownloadEvfImage` call, even after a 2-second event processing loop following the `kEdsPropID_Evf_OutputDevice` set.
-- **Refining Event Processing**: The key focus is to correctly wait for and detect the "property change notification" for `kEdsPropID_Evf_OutputDevice` before attempting to download the EVF image, as suggested by EDSDK documentation.
+- **THIRD BREAKTHROUGH**: ✅ **Main Application Running Successfully**
+  - **Runtime Environment**: Python 3.11 (recommended, has all dependencies)
+  - **Dependency Fixes**: Made syphon-python import optional for graceful degradation
+  - **Application Status**: GUI loads, camera connects reliably on first attempt
+  - **Current Capability**: Full camera connection and property management working
 
-## 🐛 Known Issues
+## 🎯 Current Issue: Live View Error 97
 
-1.  **Critical**: `EdsDownloadEvfImage` consistently fails with Error 97 (`EDS_ERR_OBJECT_NOTREADY`) after setting `kEdsPropID_Evf_OutputDevice` and processing events for 2 seconds. The camera is not yet ready for image download.
-2.  **Secondary (Revert Logic)**: Attempting to disable `kEdsPropID_Evf_Mode` in `_revert_live_view_settings_on_failure` now causes Error 129. This is because `Evf_Mode` was not explicitly enabled by our code in the current flow. (This is lower priority than successful startup).
+- **Status**: Camera connection SUCCESS, Live View download FAILS
+- **Error**: `EDS_ERR_OBJECT_NOTREADY` during `EdsDownloadEvfImage`
+- **Working Flow**: 
+  - ✅ Camera detection (1 camera found immediately)
+  - ✅ Camera connection and session establishment  
+  - ✅ EVF output device property setting (value 3 confirmed)
+  - ✅ Enhanced event processing (34 loops after property change)
+  - ❌ EVF image download fails with Error 97
 
-## 📝 Evolution of Approach
+## 📋 How to Run the Application
 
-Initial approach:
-- Set `Evf_OutputDevice` directly to PC (value 2).
-- Explicitly enable `Evf_Mode`.
-- Attempt download. (Led to various errors, including misinterpretation of `Evf_OutputDevice` value 3).
+**Correct Command**:
+```bash
+cd /Users/princeps/Projects/Poly186/poly-canon-cam
+python3.11 app.py  # Use Python 3.11 specifically
+```
 
-Revised approach 1 (after fixing `Evf_OutputDevice` ORing and validation):
-- Correctly set `Evf_OutputDevice` to 3 (TFT | PC).
-- Explicitly enable `Evf_Mode`. (This step started failing with Error 129).
-- Attempt download.
+**Environment Requirements**:
+- Python 3.11 (has tkinter support)
+- Syphon-python: Optional (gracefully disabled if missing)
+- Canon camera connected via USB in PTP mode
 
-Revised approach 2 (current, aligning with EDSDK sample):
-- Correctly set `Evf_OutputDevice` to 3.
-- **Removed explicit `Evf_Mode` set.** (This resolved the Error 129 at that specific point).
-- Process events for 2 seconds.
-- Attempt download. (Now consistently fails with Error 97).
+## ⏳ Current Focus: Error 97 Resolution
 
-Next refinement:
-- Implement a more targeted event processing mechanism after setting `Evf_OutputDevice` to specifically wait for the `kEdsPropertyEvent_PropertyChanged` notification for `kEdsPropID_Evf_OutputDevice` before attempting `EdsDownloadEvfImage`.
+### Error Analysis from Logs
+- **Property Change Event**: Times out but setting succeeds
+- **EVF Device Confirmation**: PC bit correctly set (value: 3)  
+- **Camera AE Mode**: 1310479 (may need verification for live view compatibility)
+- **Event Processing**: 34 additional loops completed after property change
+- **Failure Point**: First `EdsDownloadEvfImage` attempt
+
+### Investigation Priorities
+1. **Camera Mode Verification**: Ensure camera in appropriate mode for live view
+2. **EVF Readiness Checks**: Verify camera EVF state before download attempts
+3. **Extended Event Processing**: May need longer processing after property changes
+4. **Alternative Property Sequences**: Test different EVF initialization approaches
+
+## 📝 Evolution Summary
+
+**Phase 1** (Initial): ❌ macOS security blocking EDSDK
+**Phase 2** (Security Fixed): ✅ EDSDK loads, ❌ camera detection fails  
+**Phase 3** (Event Processing Enhanced): ✅ Camera detection working, ❌ main app import issues
+**Phase 4** (Dependencies Fixed): ✅ Main app runs, ✅ camera connects, ❌ live view Error 97
+**Phase 5** (Current): 🔄 Debugging Error 97 in live view download
+
+## 🚀 Ready for Live View Debugging
+
+**Status**: All foundational issues resolved. Camera connection fully operational. Focus now on Error 97 during EVF image download.

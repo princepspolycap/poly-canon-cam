@@ -143,14 +143,25 @@ class CanonCameraConnection:
             if err != EDS_ERR_OK:
                 self._send_log(f"Warning: Failed to set property event handler: {err}")
             
-            # Process one event immediately after SDK initialization (critical for macOS)
-            self._send_log("Processing one event immediately after SDK initialization...")
+            # Enhanced event processing after SDK initialization (critical for macOS camera detection)
+            self._send_log("Processing events intensively after SDK initialization for camera detection...")
             try:
-                init_event_err = self.edsdk.EdsGetEvent()
-                if init_event_err != EDS_ERR_OK:
-                    self._send_log(f"Warning: EdsGetEvent after SDK init returned: {init_event_err}")
+                # Process events intensively for camera detection (based on successful test pattern)
+                event_processing_duration = 3.0  # 3 seconds of event processing
+                start_time = time.time()
+                event_count = 0
+                
+                while time.time() - start_time < event_processing_duration:
+                    init_event_err = self.edsdk.EdsGetEvent()
+                    event_count += 1
+                    if init_event_err != EDS_ERR_OK and init_event_err != kEdsErr_DeviceNotFound:
+                        self._send_log(f"Warning: EdsGetEvent #{event_count} returned: {init_event_err}")
+                    time.sleep(0.05)  # 50ms intervals for proper timing
+                
+                self._send_log(f"Completed intensive event processing: {event_count} events processed over {event_processing_duration}s")
+                
             except Exception as e: # Should not happen if SDK is initialized
-                self._send_error(f"Crash during EdsGetEvent after SDK init: {e}", source_func="_initialize_sdk")
+                self._send_error(f"Crash during enhanced event processing: {e}", source_func="_initialize_sdk")
                 return False # This indicates a severe problem
 
         self._send_log("SDK initialized successfully.")
@@ -197,21 +208,39 @@ class CanonCameraConnection:
 
             self._process_events() # Process events after getting list
 
-            count_val = ctypes.c_uint32(0)
-            with self._event_lock:
-                err = self.edsdk.EdsGetChildCount(camera_list, ctypes.byref(count_val))
-            if err != EDS_ERR_OK:
-                self._send_error("Failed to get camera count", code=err, source_func="_handle_connect_command")
+            # Enhanced camera detection with retry logic (based on successful test pattern)
+            self._send_log("Detecting cameras with enhanced retry logic...")
+            max_detection_attempts = 10  # More attempts for reliable detection
+            detection_successful = False
+            
+            for attempt in range(max_detection_attempts):
+                # Process events before each detection attempt
+                for _ in range(5):
+                    self._process_events()
+                
+                count_val = ctypes.c_uint32(0)
+                with self._event_lock:
+                    err = self.edsdk.EdsGetChildCount(camera_list, ctypes.byref(count_val))
+                if err != EDS_ERR_OK:
+                    self._send_error("Failed to get camera count", code=err, source_func="_handle_connect_command")
+                    if camera_list: self.edsdk.EdsRelease(camera_list)
+                    return
+                
+                if count_val.value > 0:
+                    self._send_log(f"Found {count_val.value} camera(s) on attempt {attempt + 1}")
+                    detection_successful = True
+                    break
+                
+                if attempt < max_detection_attempts - 1:
+                    self._send_log(f"Camera detection attempt {attempt + 1}/{max_detection_attempts}: No cameras yet, retrying...")
+                    time.sleep(0.5)  # Wait before retry
+            
+            if not detection_successful:
+                self._send_error("No cameras detected after multiple attempts.", code=kEdsErr_DeviceNotFound, 
+                               source_func="_handle_connect_command",
+                               recovery_hint="Verify camera power, USB connection, and PTP mode. Check camera display for 'PC' indicator.")
                 if camera_list: self.edsdk.EdsRelease(camera_list)
                 return
-
-            if count_val.value == 0:
-                self._send_error("No cameras detected.", code=kEdsErr_DeviceNotFound, source_func="_handle_connect_command",
-                                 recovery_hint="Verify camera power, USB connection, PTP mode.")
-                if camera_list: self.edsdk.EdsRelease(camera_list)
-                return
-
-            self._send_log(f"Found {count_val.value} camera(s). Attempting to connect to the first one.")
             
             with self._event_lock:
                 err = self.edsdk.EdsGetChildAtIndex(camera_list, 0, ctypes.byref(temp_camera))

@@ -36,6 +36,24 @@ def test_edsdk():
     except Exception as e:
         print(f"⚠️  Warning during cleanup: {e}")
     
+    # Step 1.5: Check and fix macOS security attributes
+    print("\n1️⃣➕ Checking macOS security attributes...")
+    edsdk_framework_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework"
+    try:
+        # Check if quarantine attribute exists
+        result = os.system(f'xattr -l "{edsdk_framework_path}" 2>/dev/null | grep -q quarantine')
+        if result == 0:
+            print("⚠️  Quarantine attribute detected. Attempting removal...")
+            removal_result = os.system(f'find "{edsdk_framework_path}" -exec xattr -d com.apple.quarantine {{}} \\; 2>/dev/null')
+            if removal_result == 0:
+                print("✅ Quarantine attribute removed")
+            else:
+                print("⚠️  Could not remove quarantine attribute (may require manual intervention)")
+        else:
+            print("✅ No quarantine attribute found")
+    except Exception as e:
+        print(f"⚠️  Could not check security attributes: {e}")
+    
     # Step 2: Verify EDSDK path and basic file properties
     print("\n2️⃣ Verifying EDSDK library...")
     edsdk_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework/Versions/A/EDSDK"
@@ -67,10 +85,29 @@ def test_edsdk():
             print("[Worker] Starting EDSDK test worker thread...")
             print("[Worker] Loading EDSDK library...")
             
-            # Load the library (this is where the original test hung)
-            edsdk = ctypes.CDLL(abs_path)
-            print("[Worker] ✅ EDSDK library loaded successfully")
-            result_queue.put(("load_success", "EDSDK loaded"))
+            # Try multiple loading strategies for macOS compatibility
+            edsdk = None
+            loading_strategies = [
+                ("Direct CDLL", lambda: ctypes.CDLL(abs_path)),
+                ("CDLL with RTLD_LOCAL", lambda: ctypes.CDLL(abs_path, mode=ctypes.RTLD_LOCAL)),
+                ("CDLL with RTLD_GLOBAL", lambda: ctypes.CDLL(abs_path, mode=ctypes.RTLD_GLOBAL)),
+            ]
+            
+            for strategy_name, loader in loading_strategies:
+                try:
+                    print(f"[Worker] Trying {strategy_name}...")
+                    edsdk = loader()
+                    print(f"[Worker] ✅ EDSDK library loaded successfully using {strategy_name}")
+                    result_queue.put(("load_success", f"EDSDK loaded with {strategy_name}"))
+                    break
+                except Exception as e:
+                    print(f"[Worker] ❌ {strategy_name} failed: {e}")
+                    continue
+            
+            if not edsdk:
+                print("[Worker] ❌ All loading strategies failed")
+                result_queue.put(("load_failed", "All loading strategies failed"))
+                return
             
             print("[Worker] Initializing EDSDK...")
             init_result = edsdk.EdsInitializeSDK()
@@ -172,7 +209,7 @@ def test_edsdk():
         print("⚠️  Worker thread is still running (may be hung)")
         return False
     
-    print(f"\n📊 Test Summary: {success_count}/{total_tests} core tests passed")
+    print(f"📊 Test Summary: {success_count}/{total_tests} core tests passed")
     
     if success_count >= 2:  # At least load + init should work
         print("🎉 EDSDK test completed successfully!")
@@ -183,6 +220,15 @@ def test_edsdk():
         return True
     else:
         print("❌ EDSDK test failed - check camera connection and permissions")
+        print("\n🔧 macOS Security Troubleshooting:")
+        print("   If you see 'library load disallowed by system policy' errors:")
+        print("   1. In the macOS dialog, click 'Done' (NOT 'Move to Trash')")
+        print("   2. Go to System Settings > Privacy & Security")
+        print("   3. Scroll down to find 'EDSDK.framework' in the security section")
+        print("   4. Click 'Allow Anyway' next to it")
+        print("   5. Run the test again")
+        print("\n   Alternative command-line fix:")
+        print("   sudo xattr -d com.apple.quarantine 'EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework'")
         return False
 
 if __name__ == "__main__":

@@ -21,21 +21,49 @@ A Python application for controlling Canon cameras and displaying live preview u
 ## Installation
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/yourusername/poly-canon-cam.git
 cd poly-canon-cam
 ```
 
 2. Install required packages:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Ensure your Canon camera is:
-   - Connected via USB
-   - Powered on
-   - In photo mode (not video mode)
-   - Has live view capability enabled
+3. **macOS Security Setup** (Required on macOS):
+
+   If you encounter "library load disallowed by system policy" errors, run:
+
+   ```bash
+   find "EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework" -exec xattr -d com.apple.quarantine {} \; 2>/dev/null
+   ```
+
+   Alternatively, if a security dialog appears:
+   - Click "Done" (NOT "Move to Trash")
+   - Go to System Settings > Privacy & Security
+   - Find "EDSDK.framework" in the security section
+   - Click "Allow Anyway"
+
+4. Test EDSDK loading:
+
+```bash
+python3 tests/test_edsdk.py
+```
+
+5. Ensure your Canon camera is properly configured:
+
+   **Quick Setup:**
+   - Camera powered on with sufficient battery
+   - Set to shooting mode (P, Tv, Av, M, or Auto)
+   - USB connection mode set to "PC Remote" or "PTP"
+   - Live View enabled in camera menus
+   - Auto power-off disabled or set to maximum
+
+   **📖 For detailed camera setup instructions, see:**
+   `docs/Canon_Camera_Setup_Guide.md`
 
 ## Usage
 
@@ -69,14 +97,22 @@ poly-canon-cam/
 ### Testing
 
 Run the test suite:
+
 ```bash
+# Test EDSDK loading (run this first)
+python3 tests/test_edsdk.py
+
+# Test camera connection (requires camera connected)
+python3 tests/test_camera_connection.py
+
+# Run all tests
 python -m pytest tests/
 ```
 
-For tests requiring a physical camera, set the environment variable:
-```bash
-CAMERA_CONNECTED=1 python -m pytest tests/test_camera.py
-```
+For tests requiring a physical camera, ensure:
+- Camera is connected via USB
+- Camera is powered on and in shooting mode
+- Camera is set to PTP/PC connection mode
 
 ### Development Notes
 

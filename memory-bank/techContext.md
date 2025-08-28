@@ -1,29 +1,76 @@
-# Technical Context for Canon Camera SDK Implementation
+# Technical Context for New Chat Session
 
-## Development Environment
+## Quick Start Guide
 
-- macOS-based system
-- Python application using ctypes for EDSDK interfacing
-- Canon EDSDK 13.19.0 Macintosh version
+**How to Run**:
+```bash
+cd /Users/princeps/Projects/Poly186/poly-canon-cam
+python3.11 app.py  # Use Python 3.11 specifically
+```
 
-## External Dependencies
+**Current Status**: Camera connection ✅ WORKING, Live view ❌ ERROR 97
 
-- Canon EDSDK: The primary SDK for camera interaction
-- ctypes: Python library for interfacing with C-based SDKs
+## What's Working ✅
 
-## Key Constants from SDK
+1. **EDSDK Loading**: Framework loads without macOS security issues
+2. **Camera Detection**: Finds camera immediately (enhanced event processing)
+3. **Camera Connection**: Session establishment and property management
+4. **GUI Application**: Launches and connects to camera reliably
 
-- `kEdsEvfOutputDevice_PC` = 2 (bit value for PC output)
-- `kEdsEvfOutputDevice_TFT` = 1 (bit value for camera LCD)
-- `kEdsEvfMode_Enable` = 1 (value to enable EVF mode)
-- Error codes:
-  - `EDS_ERR_OK` = 0 (success)
-  - `EDS_ERR_INVALID_FN_CALL` = 129 (function called in an invalid state)
-  - `EDS_ERR_OBJECT_NOTREADY` = 0x00008D04 (object not ready for operation)
+## Current Issue 🎯
 
-## Implementation Notes
+**Error 97 in Live View**: `EDS_ERR_OBJECT_NOTREADY` during `EdsDownloadEvfImage`
 
-- EDSDK requires calling `EdsSetPropertyData` with `kEdsPropID_Evf_OutputDevice` before enabling EVF mode
-- The EDSDK documentation specifically states to use bitwise OR when setting the output device to preserve existing flags
-- Events must be processed after property changes to ensure the camera's state is updated
-- Camera state transitions can take time and require waiting for property change events
+**Log Evidence** (from latest run):
+```
+Successfully set ORed EVF output device (Result: 0).
+Confirmed EVF output device is: 3 (PC bit is 2)
+Enhanced event processing after setting Evf_OutputDevice (up to 2.0s)...
+Completed 34 event processing loops after setting Evf_OutputDevice.
+ERROR: Priming: Failed to download EVF image (Error: 97) on attempt 1.
+```
+
+## Key Technical Details
+
+**Working Patterns**:
+- SDK initialization: 56 events over 3.0 seconds
+- Camera detection: 1 camera found on first attempt
+- EVF property setting: PC bit correctly set (value 3)
+- Event processing: 34 additional loops after property change
+
+**Failure Point**: 
+- `EdsDownloadEvfImage` returns Error 97 on first attempt
+- Property change event times out but setting succeeds
+- Camera AE Mode: 1310479 (may need verification)
+
+## Dependencies Status
+
+- ✅ Python 3.11: All dependencies available (tkinter, etc.)
+- ✅ Syphon-python: Optional import (gracefully disabled if missing)
+- ❌ Python 3.13: Missing tkinter, not recommended
+
+## Investigation Focus
+
+1. **Camera Mode Requirements**: Verify camera mode for live view compatibility
+2. **EVF Readiness**: Check if camera EVF is actually ready for downloads
+3. **Extended Event Processing**: May need longer processing after property changes
+4. **Alternative Sequences**: Test different EVF initialization approaches
+
+## Architecture Overview
+
+```
+App (Python 3.11) → EDSDK Framework → Canon Camera
+    ✅ GUI              ✅ Loaded         ✅ Connected
+    ✅ Events           ✅ Properties     ❌ EVF Download
+```
+
+## Files of Interest
+
+- `src/canon_camera_connection.py`: Main camera connection logic
+- `src/live_view.py`: Live view manager (Error 97 location)
+- `tests/test_camera_connection.py`: Working camera detection patterns
+- `app.py`: Main application entry point
+
+## Next Steps for New Chat
+
+Focus on debugging Error 97 in `EdsDownloadEvfImage` - all foundational issues are resolved.
