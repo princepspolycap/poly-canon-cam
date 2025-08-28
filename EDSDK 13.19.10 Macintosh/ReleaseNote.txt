@@ -1,10 +1,14 @@
 ------------------------------------------------------------------------------------------
-                             Ver 13.19.0 Release Note
-                                   02/28/2025
+                             Ver 13.19.10 Release Note
+                                   05/12/2025
                                    Canon Inc.
 ------------------------------------------------------------------------------------------
 
 1.History
+05/12/2025 Ver 13.19.10 Release
+	* Added functionality as follows:
+	    * kEdsPropID_IBIS_HighResoShot
+	    * kEdsPropID_Flash_Target
 
 02/28/2025 Ver 13.19.0 Release
 	* Added support for macOS v15

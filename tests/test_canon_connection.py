@@ -150,7 +150,8 @@ class CanonConnectionTest(unittest.TestCase):
         
         # Step 1: Load EDSDK
         print("\nStep 1: Loading EDSDK")
-        edsdk_path = "./EDSDK 13.18.40 Macintosh/EDSDK.framework/Versions/A/EDSDK"
+        # Updated to match repository's EDSDK version and layout
+        edsdk_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework/Versions/A/EDSDK"
         try:
             self.edsdk = ctypes.CDLL(edsdk_path)
             print("✓ EDSDK loaded successfully")

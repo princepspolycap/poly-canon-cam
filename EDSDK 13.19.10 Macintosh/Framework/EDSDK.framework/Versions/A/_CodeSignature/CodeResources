@@ -10,7 +10,7 @@
 		</data>
 		<key>Resources/Info.plist</key>
 		<data>
-		l27qDHfHQfO+f0IbVB3vgvLqmUc=
+		2nrDiczSzMjUNXHqd3eMj7g7Kko=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -28,10 +28,10 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			l4xjYH9UI26M1da3wrgwSay9grk=
+			P5qhFs6eVnUbrKbyZeMfkeTEBto=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"dd9ddc5a3911c62fdd1f14ded41220c997a258f9" or cdhash H"978c63607f54236e8cd5d6b7c2b83049acbd82b9" or cdhash H"1b161cc4e787fc56f8e4827687d14f03cb4a572d" or cdhash H"8b8b97e225b4684500bfa4a8ae5407632622e895"</string>
+			<string>cdhash H"cb19fa9e74cc99972b9917949b988577a05dfe8e" or cdhash H"3f9aa116ce9e56751baca6f265e31f91e4c406da" or cdhash H"03e909575a054df54c8157bedbeaaa8de0da5108" or cdhash H"ec29f026486c4b1567154b1b6b7ae24621bc2d92"</string>
 		</dict>
 		<key>Resources/DeviceInfo.plist</key>
 		<dict>
@@ -48,11 +48,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			l27qDHfHQfO+f0IbVB3vgvLqmUc=
+			2nrDiczSzMjUNXHqd3eMj7g7Kko=
 			</data>
 			<key>hash2</key>
 			<data>
-			ReyWaetuuOqOC77LADjifQXuUALrQfou6Lf4y8LdwGs=
+			U7wajZmmRDcT5wHL+hwlg5mvoFHBO3oEAI0d/rgh7ys=
 			</data>
 		</dict>
 	</dict>

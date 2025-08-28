@@ -48,7 +48,7 @@ class CanonCameraConnection:
         self.worker_thread = None
         self.shutdown_event = threading.Event()
         self.live_view_active = False
-        self._edsdk_path = "./EDSDK 13.19.0 Macintosh/EDSDK.framework/Versions/A/EDSDK"
+        self._edsdk_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework/Versions/A/EDSDK"
 
     def _send_data(self, msg_type, payload):
         if self.data_queue:

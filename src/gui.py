@@ -26,7 +26,7 @@ from .canon_camera_connection import (
     MSG_CONNECTION_STATUS, MSG_LOG
 )
 from src.camera_constants import CameraError
-from . import SyphonWebcamOutput # Keep for now
+from .virtual_webcam import SyphonWebcamOutput  # Import the class properly
 from . import gui_style
 
 
