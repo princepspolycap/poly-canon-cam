@@ -444,15 +444,27 @@ class CameraControlPanel:
         """Disconnect from camera"""
         if self.camera_connection:
             self.log_display.log("Disconnecting from camera...")
+            
+            # Stop live view first if active
+            if self.is_running_live_view:
+                self.cmd_stop_live_view()
+                time.sleep(0.3)  # Brief delay
+            
             self.camera_command_queue.put({
-                "action": "disconnect",
+                "action": "shutdown",  # Use shutdown instead of disconnect for clean exit
                 "data": {}
             })
             
-            # Stop camera worker thread
-            self.camera_connection = None
-            
+            # Give worker thread time to clean up
+            self.root.after(500, self._finalize_disconnect)
+        else:
             self._reset_to_disconnected_state()
+    
+    def _finalize_disconnect(self):
+        """Finalize disconnect after worker thread cleanup"""
+        self.camera_connection = None
+        self._reset_to_disconnected_state()
+        self.log_display.log("Camera disconnected successfully.")
 
     def cmd_start_live_view(self):
         """Start live view"""

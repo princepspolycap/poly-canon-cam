@@ -2,7 +2,7 @@ from src.camera_constants import (
     EDS_ERR_OK, EDS_ERR_OBJECT_NOTREADY, CameraError, CameraStatus, kEdsCameraCommand_ExtendShutDownTimer,
     kEdsErr_DeviceNotFound, kEdsPropID_SaveTo, kEdsSaveTo_Host,
     kEdsPropID_ProductName, kEdsPropID_BodyIDEx, kEdsPropID_FirmwareVersion,
-    kEdsPropID_BatteryLevel, kEdsPropID_TempStatus, kEdsPropID_AEModuleMode,
+    kEdsPropID_BatteryLevel, kEdsPropID_TempStatus, kEdsPropID_AEMode,
     kEdsPropID_Evf_OutputDevice, kEdsEvfOutputDevice_PC,
     kEdsPropID_Evf_Mode, kEdsEvfMode_Enable,
     CMD_CONNECT, CMD_DISCONNECT, CMD_START_LIVE_VIEW, CMD_STOP_LIVE_VIEW,
@@ -424,24 +424,34 @@ class CanonCameraConnection:
             product_name_str = ctypes.create_string_buffer(256)
             with self._event_lock:
                 if self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_ProductName, 0, 256, product_name_str) == EDS_ERR_OK:
-                    info["product_name"] = product_name_str.value.decode('utf-8', errors='ignore').strip()
+                    model_name = product_name_str.value.decode('utf-8', errors='ignore').strip()
+                    info["model"] = model_name if model_name else "Unknown"
+                else:
+                    info["model"] = "Unknown"
             
             # Serial Number (BodyIDEx)
             serial_str = ctypes.create_string_buffer(256)
             with self._event_lock:
                 if self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_BodyIDEx, 0, 256, serial_str) == EDS_ERR_OK:
-                    info["serial_number"] = serial_str.value.decode('utf-8', errors='ignore').strip()
+                    serial_num = serial_str.value.decode('utf-8', errors='ignore').strip()
+                    info["serial"] = serial_num if serial_num else "Unknown"
+                else:
+                    info["serial"] = "Unknown"
 
             # Firmware Version
             firmware_str = ctypes.create_string_buffer(256)
             with self._event_lock:
                 if self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_FirmwareVersion, 0, 256, firmware_str) == EDS_ERR_OK:
-                    info["firmware_version"] = firmware_str.value.decode('utf-8', errors='ignore').strip()
+                    firmware_ver = firmware_str.value.decode('utf-8', errors='ignore').strip()
+                    info["firmware"] = firmware_ver if firmware_ver else "Unknown"
+                else:
+                    info["firmware"] = "Unknown"
             
+            self._send_log(f"Camera Info Retrieved: {info.get('model', 'N/A')} (S/N: {info.get('serial', 'N/A')})")
             return info
         except Exception as e:
             self._send_error(f"Error getting camera info: {e}", source_func="_get_camera_info_internal")
-            return None
+            return {"model": "Unknown", "serial": "Unknown", "firmware": "Unknown"}
 
     def _get_status_internal(self):
         """Retrieves camera status. Called by worker thread."""
@@ -468,7 +478,7 @@ class CanonCameraConnection:
             # AE Mode (Shooting Mode)
             ae_mode = ctypes.c_uint32()
             with self._event_lock:
-                if self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_AEModuleMode, 0, ctypes.sizeof(ae_mode), ctypes.byref(ae_mode)) == EDS_ERR_OK:
+                if self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_AEMode, 0, ctypes.sizeof(ae_mode), ctypes.byref(ae_mode)) == EDS_ERR_OK:
                     current_status.mode = ae_mode.value # This is a numerical code
 
             self.status = current_status # Update the class instance status
@@ -536,7 +546,7 @@ class CanonCameraConnection:
             # Check camera's current shooting mode first for diagnostics
             ae_mode = ctypes.c_uint32()
             with self._event_lock:
-                err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_AEModuleMode, 0, 
+                err = self.edsdk.EdsGetPropertyData(self.camera, kEdsPropID_AEMode, 0, 
                                                   ctypes.sizeof(ae_mode), ctypes.byref(ae_mode))
             if err == EDS_ERR_OK:
                 mode_str = self._get_camera_mode_string(ae_mode.value)
@@ -663,10 +673,12 @@ class CanonCameraConnection:
         if not self.camera or not self.session_open or not self.live_view_active:
             return
 
-        # Debug: Log first capture attempt
+        # Debug: Log first capture attempt and track performance
         if not hasattr(self, '_capture_attempt_logged'):
             self._send_log("🎥 Starting frame capture loop...")
             self._capture_attempt_logged = True
+            self._frame_count = 0
+            self._notready_count = 0
 
         stream = ctypes.c_void_p()
         evf_image_ref = ctypes.c_void_p()
@@ -694,14 +706,20 @@ class CanonCameraConnection:
 
             # Step 3: Download EVF image using correct Canon API
             # From Canon docs: "EdsDownloadEvfImage(EdsCameraRef inCameraRef, EdsEvfImageRef inEvfImageRef)"
+            # Note: "Be sure to retry if EDS_ERR_OBJECT_NOTREADY is returned"
             with self._event_lock:
                 err = self.edsdk.EdsDownloadEvfImage(self.camera, evf_image_ref)
             if err != EDS_ERR_OK:
-                if err == EDS_ERR_OBJECT_NOTREADY or err == 0x0000A102:  # Normal when camera between frames
-                    # Silent retry - this is normal
-                    pass
+                if err == EDS_ERR_OBJECT_NOTREADY or err == 0x0000A102:  
+                    # Per Canon docs: "OBJECT_NOTREADY returns when the image data set is not ready"
+                    # This is normal - camera doesn't have a new frame yet
+                    # Track for performance monitoring
+                    self._notready_count += 1
+                    if self._notready_count % 100 == 0:
+                        ratio = self._frame_count / max(self._notready_count, 1) * 100
+                        self._send_log(f"📊 Performance: {self._frame_count} frames, {self._notready_count} not-ready ({ratio:.1f}% success rate)")
                 else:
-                    # Only log non-retry errors
+                    # Only log unexpected errors once
                     if not hasattr(self, '_download_error_logged') or self._download_error_logged != err:
                         self._send_error(f"Failed to download EVF image (Error: {err} / 0x{err:04x})", 
                                        code=err, source_func="_capture_live_frame_internal")
@@ -718,10 +736,15 @@ class CanonCameraConnection:
                 # Copy image data and send to queue
                 frame_data = ctypes.string_at(image_data_ptr, image_length.value)
                 self._send_data(MSG_LIVE_FRAME, {"frame_data": frame_data, "timestamp": time.time()})
-                # Also log first successful frame capture
-                if not hasattr(self, '_first_frame_logged'):
+                
+                # Track successful frames
+                self._frame_count += 1
+                
+                # Log first successful frame capture
+                if self._frame_count == 1:
                     self._send_log(f"📸 First frame captured! Size: {image_length.value} bytes")
-                    self._first_frame_logged = True
+                elif self._frame_count % 100 == 0:
+                    self._send_log(f"📊 {self._frame_count} frames captured successfully")
             
             self._cleanup_evf_resources(stream, evf_image_ref)
 
@@ -831,7 +854,9 @@ class CanonCameraConnection:
 
         self._send_log("SDK Worker thread started and initialized.")
         last_status_check_time = 0
-        live_view_frame_interval = 1.0 / 15 # Target ~15 FPS for live view processing
+        # Don't artificially limit FPS - let camera throttle naturally via OBJECT_NOTREADY
+        # Camera will return frames at its natural rate (typically 30-60 FPS for Canon)
+        live_view_frame_interval = 1.0 / 60  # Poll at 60 FPS, camera will throttle naturally
 
         while not self.shutdown_event.is_set():
             self._process_events() # Keep SDK events flowing
@@ -872,8 +897,7 @@ class CanonCameraConnection:
             # Live view frame capture
             if self.live_view_active and self.camera and self.session_open:
                 self._capture_live_frame_internal()
-                # Add a small delay to control live view FPS from worker side
-                # This is a simple way; a more robust timer could be used.
+                # Minimal delay - let camera throttle via OBJECT_NOTREADY per Canon docs
                 time.sleep(live_view_frame_interval) 
 
             # Periodic status check (e.g., every 2 seconds)

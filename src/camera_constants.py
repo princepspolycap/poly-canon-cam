@@ -4,22 +4,22 @@ import ctypes
 from dataclasses import dataclass
 
 # EDSDK Constants and Error Codes
-# Camera Properties
-kEdsPropID_ProductName = 0x00000004
-kEdsPropID_BodyIDEx = 0x00000101
-kEdsPropID_FirmwareVersion = 0x00000003
-kEdsPropID_AEModuleMode = 0x00000100 # Auto Exposure Mode (shooting mode)
+# Camera Properties (from EDSDK API 13.19.10 Documentation)
+kEdsPropID_ProductName = 0x00000002  # Product name
+kEdsPropID_BodyIDEx = 0x00000015  # Extension Body ID (Serial Number)
+kEdsPropID_FirmwareVersion = 0x00000007  # Firmware version
+kEdsPropID_BatteryLevel = 0x00000008  # Battery state: 0-100% or AC
+kEdsPropID_AEMode = 0x00000400  # Auto Exposure Mode (shooting mode)
 
 # EVF Related
 kEdsPropID_Evf_Mode = 0x00000501
 kEdsEvfMode_Enable = 0x01 # Enable EVF mode
 kEdsPropID_Evf_OutputDevice = 0x00000500
-kEdsPropID_Evf_DepthOfFieldPreview = 0x00000503
-kEdsPropID_Evf_AFMode = 0x00000504
-kEdsPropID_Evf_ZoomPosition = 0x00000507
-kEdsPropID_Evf_HistogramStatus = 0x0000050B
-kEdsPropID_TempStatus = 0x01000003
-kEdsPropID_BatteryLevel = 0x00000008
+kEdsPropID_Evf_DepthOfFieldPreview = 0x00000504
+kEdsPropID_Evf_AFMode = 0x0000050E
+kEdsPropID_Evf_ZoomPosition = 0x00000508
+kEdsPropID_Evf_HistogramStatus = 0x0000050C
+kEdsPropID_TempStatus = 0x01000415
 kEdsPropID_Record = 0x00000510
 
 # Device States
