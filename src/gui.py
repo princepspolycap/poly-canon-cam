@@ -422,7 +422,8 @@ class CameraControlPanel:
         self.is_connecting = True
         self.connect_button.config(state=tk.DISABLED, text="Connecting...")
         
-        # Create new camera connection if needed
+        # Create new camera connection worker ONLY if one doesn't exist
+        # This allows fast reconnection without SDK reinitialization
         if not self.camera_connection:
             self.log_display.log("No active camera worker, creating new one.")
             self.camera_connection = CanonCameraConnection()
@@ -430,6 +431,8 @@ class CameraControlPanel:
                 command_queue=self.camera_command_queue,
                 data_queue=self.camera_data_queue
             )
+        else:
+            self.log_display.log("Reusing existing camera worker for reconnection.")
         
         # Send connect command
         self.camera_command_queue.put({
@@ -441,30 +444,32 @@ class CameraControlPanel:
         self.auto_start_live_view = True
 
     def cmd_disconnect_camera(self):
-        """Disconnect from camera"""
+        """Disconnect from camera (keep SDK/worker alive for fast reconnection)"""
         if self.camera_connection:
             self.log_display.log("Disconnecting from camera...")
             
-            # Stop live view first if active
+            # Stop live view first if active with proper wait time
             if self.is_running_live_view:
                 self.cmd_stop_live_view()
-                time.sleep(0.3)  # Brief delay
+                time.sleep(1.0)  # Increased wait time for live view to fully stop
             
+            # ONLY send disconnect command - DO NOT shutdown worker/SDK
+            # This keeps the worker thread and SDK initialized for fast reconnection
             self.camera_command_queue.put({
-                "action": "shutdown",  # Use shutdown instead of disconnect for clean exit
+                "action": "disconnect",
                 "data": {}
             })
             
-            # Give worker thread time to clean up
-            self.root.after(500, self._finalize_disconnect)
+            # Wait for disconnect to complete (shorter delay since no SDK termination)
+            self.root.after(1000, self._finalize_disconnect)
         else:
             self._reset_to_disconnected_state()
     
     def _finalize_disconnect(self):
-        """Finalize disconnect after worker thread cleanup"""
-        self.camera_connection = None
+        """Finalize disconnect - keep worker/SDK alive for reconnection"""
+        # DON'T set self.camera_connection to None - keep worker alive!
         self._reset_to_disconnected_state()
-        self.log_display.log("Camera disconnected successfully.")
+        self.log_display.log("Camera disconnected successfully. SDK ready for reconnection.")
 
     def cmd_start_live_view(self):
         """Start live view"""
@@ -517,7 +522,22 @@ class CameraControlPanel:
         """Handle window closing"""
         if self.camera_connection:
             self.log_display.log("Closing application...")
-            self.cmd_disconnect_camera()
+            
+            # First disconnect camera if connected
+            if self.is_running_live_view:
+                self.cmd_stop_live_view()
+                time.sleep(0.5)
+            
+            # Send disconnect command
+            self.camera_command_queue.put({"action": "disconnect", "data": {}})
+            time.sleep(0.5)
+            
+            # NOW shutdown the SDK worker completely
+            self.log_display.log("Shutting down camera SDK...")
+            self.camera_command_queue.put({"action": "shutdown", "data": {}})
+            time.sleep(1.0)  # Wait for clean shutdown
+            
+            self.camera_connection = None
         
         # Cancel any pending after callbacks
         if self._data_queue_after_id:

@@ -211,16 +211,15 @@ def disconnect_and_cleanup_camera_resources(edsdk, camera_ref, session_open, liv
     if edsdk and camera_ref and live_view_active:
         send_log_func_internal("Stopping live view...")
         try:
-            evf_mode_off = ctypes.c_uint32(0)
-            err = _sdk_call(edsdk.EdsSetPropertyData, camera_ref, kEdsPropID_Evf_Mode, 0, ctypes.sizeof(evf_mode_off), ctypes.byref(evf_mode_off))
+            # Per Canon SAMPLE10: Only manage OutputDevice, not EVF mode
+            # Camera handles EVF mode internally when OutputDevice changes
+            output_device_camera = ctypes.c_uint32(0x01)  # Revert to camera LCD
+            err = _sdk_call(edsdk.EdsSetPropertyData, camera_ref, kEdsPropID_Evf_OutputDevice, 0, 
+                           ctypes.sizeof(output_device_camera), ctypes.byref(output_device_camera))
             if err != EDS_ERR_OK:
-                send_error_func_internal(f"Failed to disable EVF mode during cleanup: {err}", code=err)
-            
-            output_device_camera = ctypes.c_uint32(0) # Revert to camera LCD
-            err = _sdk_call(edsdk.EdsSetPropertyData, camera_ref, kEdsPropID_Evf_OutputDevice, 0, ctypes.sizeof(output_device_camera), ctypes.byref(output_device_camera))
-            if err != EDS_ERR_OK:
-                 send_error_func_internal(f"Failed to set EVF output to camera during cleanup: {err}", code=err)
-            send_log_func_internal("Live view stopped.")
+                send_error_func_internal(f"Failed to set EVF output to camera during cleanup: {err}", code=err)
+            else:
+                send_log_func_internal("Live view stopped.")
         except Exception as e:
             send_error_func_internal(f"Exception stopping live view during cleanup: {e}")
         # live_view_active = False # State change handled by caller if needed

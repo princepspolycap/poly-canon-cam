@@ -52,6 +52,24 @@ class CanonCameraConnection:
         self.shutdown_event = threading.Event()
         self.live_view_active = False
         self._edsdk_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework/Versions/A/EDSDK"
+        
+        # Frame capture tracking
+        self._capture_attempt_logged = False
+        self._frame_count = 0
+        self._notready_count = 0
+
+    def _reset_connection_state(self):
+        """Fully reset all connection state variables to prepare for clean reconnection."""
+        self._send_log("Resetting connection state...")
+        self.camera = None
+        self.session_open = False
+        self.live_view_active = False
+        self._handler_context = None
+        self._capture_attempt_logged = False
+        self._frame_count = 0
+        self._notready_count = 0
+        self._evf_output_device_changed_event.clear()
+        self._property_event_data = {"property_id": None, "event_type": None}
 
     def _send_data(self, msg_type, payload):
         if self.data_queue:
@@ -230,22 +248,6 @@ class CanonCameraConnection:
 
         return self._apply_evf_output_device(desired_value)
 
-    def _ensure_evf_mode_disabled(self):
-        """Disable EVF mode before enabling live view to avoid stale camera state."""
-        evf_mode_off = ctypes.c_uint32(0)
-        with self._event_lock:
-            err = self.edsdk.EdsSetPropertyData(
-                self.camera, kEdsPropID_Evf_Mode, 0,
-                ctypes.sizeof(evf_mode_off), ctypes.byref(evf_mode_off))
-        if err == EDS_ERR_OK:
-            self._send_log("Ensured EVF mode is disabled before starting live view.")
-        else:
-            self._send_log(f"EVF mode disable returned {err}; continuing.")
-        self._process_events()
-        camera_utils.pump_macos_runloop(duration_sec=0.05, iterations=4)
-        time.sleep(RECOVERY_DELAY_SHORT)
-        self._process_events()
-
     def _process_events(self):
         """Process pending camera events. Called by worker thread."""
         if not self.edsdk or self.shutdown_event.is_set():
@@ -269,6 +271,17 @@ class CanonCameraConnection:
             if info: self._send_data(MSG_CAMERA_INFO, info)
             return
 
+        # CRITICAL: Reset state and perform system cleanup before connection attempt
+        self._reset_connection_state()
+        
+        # System-level cleanup to ensure camera is not locked
+        self._send_log("Performing system-level cleanup before connection...")
+        camera_utils.cleanup_macos_camera_connection(send_log_func=self._send_log)
+        
+        # Allow USB and camera to stabilize after cleanup
+        self._send_log("Waiting for USB/camera stabilization...")
+        time.sleep(1.0)
+        
         camera_list = ctypes.c_void_p()
         temp_camera = ctypes.c_void_p()
         camera_found = False
@@ -601,13 +614,7 @@ class CanonCameraConnection:
         try:
             self._send_log("Reverting live view settings...")
             
-            # Disable EVF mode
-            evf_mode_off = ctypes.c_uint32(0)
-            with self._event_lock:
-                self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_Mode, 0, 
-                                            ctypes.sizeof(evf_mode_off), ctypes.byref(evf_mode_off))
-            
-            # Set EVF output back to camera LCD (usually 1)
+            # Set EVF output back to camera LCD
             output_device = ctypes.c_uint32(original_evf_output_device_target)
             with self._event_lock:
                 self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0,
@@ -623,7 +630,8 @@ class CanonCameraConnection:
         """
         Stop live view and revert camera to default state.
         
-        Follows EDSDK specification for proper cleanup of EVF resources.
+        Per Canon SAMPLE10: Only manage kEdsPropID_Evf_OutputDevice.
+        The camera automatically manages EVF mode internally.
         """
         if not self.camera or not self.session_open:
             self.live_view_active = False
@@ -635,29 +643,26 @@ class CanonCameraConnection:
         try:
             self._send_log("Stopping live view...")
             
-            # Step 1: Disable EVF mode first
-            evf_mode = ctypes.c_uint32(0)
+            # ONLY revert EVF output device to Camera LCD (per Canon documentation)
+            # The camera automatically handles EVF mode when we change this
+            output_device = ctypes.c_uint32(0x01)  # Camera LCD only
             with self._event_lock:
-                err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_Mode, 0, 
-                                                   ctypes.sizeof(evf_mode), ctypes.byref(evf_mode))
+                err = self.edsdk.EdsSetPropertyData(
+                    self.camera, kEdsPropID_Evf_OutputDevice, 0, 
+                    ctypes.sizeof(output_device), ctypes.byref(output_device)
+                )
+            
             if err != EDS_ERR_OK:
-                self._send_error("Failed to disable EVF mode.", code=err, source_func="_handle_stop_live_view_command")
+                self._send_error(f"Failed to revert EVF output device (Error: {err})", 
+                               code=err, source_func="_handle_stop_live_view_command")
             
-            # Process events after disabling EVF mode
-            self._process_events()
-            time.sleep(RECOVERY_DELAY_SHORT)
+            # Process events to let camera apply changes
+            self._send_log("Processing events after EVF output device change...")
+            for _ in range(10):
+                self._process_events()
+                time.sleep(0.05)
             
-            # Step 2: Revert EVF output device to Camera LCD
-            output_device = ctypes.c_uint32(0x01)
-            with self._event_lock:
-                err = self.edsdk.EdsSetPropertyData(self.camera, kEdsPropID_Evf_OutputDevice, 0, 
-                                                   ctypes.sizeof(output_device), ctypes.byref(output_device))
-            if err != EDS_ERR_OK:
-                self._send_error("Failed to revert EVF output device.", code=err, source_func="_handle_stop_live_view_command")
-            
-            # Process events after reverting output device
-            self._process_events()
-            time.sleep(RECOVERY_DELAY_SHORT)
+            camera_utils.pump_macos_runloop(duration_sec=0.1, iterations=5)
 
             self.live_view_active = False
             self._send_log("✅ Live view stopped successfully.")
@@ -783,6 +788,14 @@ class CanonCameraConnection:
                 with self._event_lock:
                     self.edsdk.EdsCloseSession(self.camera)
                 self._send_log("Camera session closed.")
+                
+                # CRITICAL: Process events after closing session to ensure camera acknowledges
+                self._send_log("Processing events after session close...")
+                for _ in range(20):  # 1 second of event processing
+                    self._process_events()
+                    time.sleep(0.05)
+                camera_utils.pump_macos_runloop(duration_sec=0.1, iterations=5)
+                
             except Exception as e:
                 self._send_error(f"Error closing session: {e}", source_func="_handle_disconnect_command")
             self.session_open = False
@@ -805,29 +818,32 @@ class CanonCameraConnection:
     def _worker_shutdown_cleanup(self):
         """Cleans up SDK resources when worker thread is stopping."""
         self._send_log("Worker thread shutting down. Cleaning up resources...")
-        self._handle_disconnect_command(called_by_shutdown=True) # Ensure camera is disconnected
+        
+        # First, properly disconnect the camera
+        self._handle_disconnect_command(called_by_shutdown=True)
 
+        # CRITICAL: Do comprehensive cleanup BEFORE terminating SDK
+        # The camera_utils function needs a valid SDK reference
+        if self.edsdk:
+            camera_utils.disconnect_and_cleanup_camera_resources(
+                self.edsdk, self.camera, self.session_open, self.live_view_active,
+                send_log_func=self._send_log, send_error_func=self._send_error, event_lock=self._event_lock
+            )
+
+        # NOW terminate SDK after cleanup is done
         if self.edsdk:
             try:
-                with self._event_lock: # Though SDK termination should be final
+                with self._event_lock:
                     err = self.edsdk.EdsTerminateSDK()
                 if err == EDS_ERR_OK:
                     self._send_log("EDSDK terminated successfully.")
                 else:
-                    # This can happen if resources weren't released properly or SDK is in a bad state
                     self._send_log(f"Warning: EdsTerminateSDK returned error: {err}. This might be okay on macOS if resources were released.")
             except Exception as e:
                 self._send_error(f"Exception during EdsTerminateSDK: {e}", source_func="_worker_shutdown_cleanup")
         
         self.edsdk = None
-        # self._send_log("Low-level macOS cleanup (usbd restart) if applicable...")
-        # self._low_level_cleanup() # Perform macOS specific cleanup
-        # The comprehensive cleanup will be handled by camera_utils
-        camera_utils.disconnect_and_cleanup_camera_resources(
-            self.edsdk, self.camera, self.session_open, self.live_view_active,
-            send_log_func=self._send_log, send_error_func=self._send_error, event_lock=self._event_lock
-        )
-        self._send_log("Worker shutdown cleanup complete using camera_utils.")
+        self._send_log("Worker shutdown cleanup complete.")
         self._send_data(MSG_CONNECTION_STATUS, {"status": "shutdown_complete", "message": "Worker shut down."})
 
 
