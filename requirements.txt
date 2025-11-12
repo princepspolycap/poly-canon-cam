@@ -6,3 +6,7 @@ Pillow>=9.0.0    # Image processing for GUI display
 # Testing
 pytest>=7.0.0    # Modern Python testing framework
 pytest-cov>=4.0.0    # Test coverage reporting
+
+# Virtual Webcam
+syphon-python>=0.1.1    # Syphon output for OBS (optional)
+pyvirtualcam>=0.9.1     # Virtual camera for Google Meet/Teams (requires OBS Virtual Camera)
