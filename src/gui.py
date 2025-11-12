@@ -344,6 +344,9 @@ class CameraControlPanel:
         self.camera_firmware_label.config(text=f"Firmware: {firmware}")
 
     def _handle_status_update_message(self, payload):
+        """Handle status updates from camera worker thread"""
+        # ONLY handle live_view_status if it's actually in the payload
+        # Canon sends status updates every 2 seconds - we now include live_view_status based on actual state
         if "live_view_status" in payload:
             lv_status = payload["live_view_status"]
             if lv_status == "active":
@@ -353,16 +356,21 @@ class CameraControlPanel:
                 self.log_display.log("Live view is now active")
                 
                 # Note: Virtual webcam will be started when first frame arrives (auto-detect size)
-            else:
+            elif lv_status == "inactive":  # Only stop if explicitly inactive
                 self.is_running_live_view = False
                 self.stop_lv_button.config(state=tk.DISABLED)
                 if self.camera_connection:
                     self.status_label.config(text="🟢 Connected")
                 
-                # Stop virtual webcam when live view stops
+                # Stop virtual webcam when live view explicitly stops
                 if self.virtual_webcam and self.virtual_webcam.is_running:
                     self.virtual_webcam.stop()
+                    if hasattr(self, '_virtual_webcam_initialized'):
+                        delattr(self, '_virtual_webcam_initialized')
                     self.log_display.log("Virtual camera stopped")
+        
+        # Handle other status fields (battery, frames, etc.) without affecting live view state
+        # Don't change live_view state unless live_view_status is explicitly present!
 
     def _handle_live_frame_message(self, payload):
         frame_data = payload.get("frame_data")
@@ -397,17 +405,19 @@ class CameraControlPanel:
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Initialize virtual webcam on first frame only
-            if self.virtual_webcam and not self.virtual_webcam.is_running:
+            # Initialize virtual webcam ONCE on first frame only
+            # Don't check is_running on every frame - it causes restart loops!
+            if self.virtual_webcam and not hasattr(self, '_virtual_webcam_initialized'):
                 # Auto-detect frame size from first frame
                 h, w = frame_rgb.shape[:2]
                 if self.virtual_webcam.start(w, h, 30):
+                    self._virtual_webcam_initialized = True
                     self.log_display.log(f"✓ Virtual camera started at {w}x{h} (OBS Virtual Camera)", level="success")
                 else:
                     self.log_display.log("Virtual camera not available - install OBS and start Virtual Camera", level="warning")
             
-            # Send frame to virtual webcam
-            if self.virtual_webcam and self.virtual_webcam.is_running:
+            # Always send frames if initialized (delivery thread handles buffering)
+            if self.virtual_webcam and hasattr(self, '_virtual_webcam_initialized'):
                 self.virtual_webcam.send_frame(frame_rgb)
             
             # Get canvas size
@@ -518,6 +528,8 @@ class CameraControlPanel:
             # Stop virtual webcam first
             if self.virtual_webcam and self.virtual_webcam.is_running:
                 self.virtual_webcam.stop()
+                if hasattr(self, '_virtual_webcam_initialized'):
+                    delattr(self, '_virtual_webcam_initialized')
                 self.log_display.log("Virtual camera stopped")
             
             self.camera_command_queue.put({
@@ -560,6 +572,8 @@ class CameraControlPanel:
             # Stop virtual webcam first
             if self.virtual_webcam and self.virtual_webcam.is_running:
                 self.virtual_webcam.stop()
+                if hasattr(self, '_virtual_webcam_initialized'):
+                    delattr(self, '_virtual_webcam_initialized')
             
             # First disconnect camera if connected
             if self.is_running_live_view:

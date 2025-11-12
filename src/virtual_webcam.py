@@ -17,6 +17,10 @@ except ImportError:
     pyvirtualcam = None
     print("Warning: PyVirtualCam not available. Virtual camera output disabled.")
 
+import threading
+import time
+from collections import deque
+
 class SyphonWebcamOutput:
     def __init__(self, server_name="CanonCamSyphon"):
         if not SYPHON_AVAILABLE:
@@ -115,7 +119,12 @@ class SyphonWebcamOutput:
         self.texture = None # Release texture
 
 class PyVirtualCamOutput:
-    """Virtual camera output using PyVirtualCam (requires OBS Virtual Camera on macOS)"""
+    """
+    Virtual camera output using PyVirtualCam with dedicated delivery thread.
+    
+    Maintains consistent frame rate (24-30 FPS) independent of source timing.
+    Uses frame buffer to smooth out Canon camera's variable frame delivery.
+    """
     def __init__(self, name="PolyCanonCam"):
         if not PYVIRTUALCAM_AVAILABLE:
             print(f"Warning: PyVirtualCam not available. {name} virtual camera disabled.")
@@ -125,10 +134,22 @@ class PyVirtualCamOutput:
         self.is_running = False
         self.width = 0
         self.height = 0
-        self.fps = 30
+        self.target_fps = 30
+        
+        # Frame buffer and delivery thread
+        self.frame_buffer = deque(maxlen=10)  # Keep last 10 frames for better smoothing
+        self.buffer_lock = threading.Lock()
+        self.delivery_thread = None
+        self.stop_event = threading.Event()
+        
+        # Stats for monitoring
+        self.frames_sent = 0
+        self.frames_dropped = 0
+        self.frames_queued = 0
+        self.last_frame = None
 
     def start(self, width, height, fps=30):
-        """Start virtual camera output"""
+        """Start virtual camera output with dedicated delivery thread"""
         if not PYVIRTUALCAM_AVAILABLE:
             print("PyVirtualCam not available - cannot start virtual camera")
             return False
@@ -139,14 +160,25 @@ class PyVirtualCamOutput:
         
         self.width = width
         self.height = height
-        self.fps = fps
+        self.target_fps = max(24, min(fps, 30))  # Clamp to 24-30 FPS range
         
         try:
             # On macOS, this requires OBS Virtual Camera to be installed
-            self.cam = pyvirtualcam.Camera(width, height, fps, fmt=pyvirtualcam.PixelFormat.RGB)
+            self.cam = pyvirtualcam.Camera(width, height, self.target_fps, fmt=pyvirtualcam.PixelFormat.RGB)
             self.is_running = True
-            print(f"Virtual camera '{self.name}' started at {width}x{height} @ {fps}fps")
+            
+            # Start dedicated delivery thread
+            self.stop_event.clear()
+            self.delivery_thread = threading.Thread(
+                target=self._frame_delivery_loop,
+                name=f"{self.name}_DeliveryThread",
+                daemon=True
+            )
+            self.delivery_thread.start()
+            
+            print(f"Virtual camera '{self.name}' started at {width}x{height} @ {self.target_fps}fps")
             print(f"Device: {self.cam.device}")
+            print(f"Frame buffer: {self.frame_buffer.maxlen} frames for timing smoothness")
             return True
         except Exception as e:
             print(f"Failed to start virtual camera: {e}")
@@ -156,8 +188,11 @@ class PyVirtualCamOutput:
             return False
 
     def send_frame(self, frame_rgb):
-        """Send RGB frame to virtual camera"""
-        if not PYVIRTUALCAM_AVAILABLE or not self.is_running or self.cam is None:
+        """
+        Queue RGB frame for delivery to virtual camera.
+        Frames are sent by dedicated thread at consistent FPS.
+        """
+        if not PYVIRTUALCAM_AVAILABLE or not self.is_running:
             return
             
         try:
@@ -165,29 +200,97 @@ class PyVirtualCamOutput:
             if frame_rgb.shape[2] == 4:  # RGBA to RGB
                 frame_rgb = frame_rgb[:, :, :3]
             
-            # Verify dimensions match - resize if needed (should not happen if properly initialized)
+            # Verify dimensions match - resize if needed
             if frame_rgb.shape[0] != self.height or frame_rgb.shape[1] != self.width:
                 import cv2
                 frame_rgb = cv2.resize(frame_rgb, (self.width, self.height))
             
-            self.cam.send(frame_rgb)
-            
+            # Add to buffer (thread-safe)
+            with self.buffer_lock:
+                was_full = len(self.frame_buffer) >= self.frame_buffer.maxlen
+                self.frame_buffer.append(frame_rgb.copy())
+                self.frames_queued += 1
+                
+                if was_full:
+                    self.frames_dropped += 1
+                    # Only log every 50th drop to avoid spam
+                    if self.frames_dropped % 50 == 0:
+                        print(f"[{self.name}] Warning: Buffer full, {self.frames_dropped} frames dropped total")
+                
         except Exception as e:
-            print(f"Error sending frame to virtual camera: {e}")
+            print(f"Error queuing frame to virtual camera: {e}")
+
+    def _frame_delivery_loop(self):
+        """
+        Dedicated thread that delivers frames at consistent FPS.
+        
+        This ensures OBS Virtual Camera receives frames at exactly the target
+        frame rate, preventing disconnects and logo flashing.
+        """
+        print(f"[{self.name}] Frame delivery thread started (target: {self.target_fps} FPS)")
+        
+        while not self.stop_event.is_set():
+            try:
+                # Get latest frame from buffer
+                frame_to_send = None
+                with self.buffer_lock:
+                    if self.frame_buffer:
+                        # Always use the most recent frame
+                        frame_to_send = self.frame_buffer[-1]
+                        self.last_frame = frame_to_send
+                    elif self.last_frame is not None:
+                        # No new frames - reuse last frame to maintain stream
+                        frame_to_send = self.last_frame
+                
+                # Send frame to virtual camera
+                if frame_to_send is not None and self.cam is not None:
+                    self.cam.send(frame_to_send)
+                    self.frames_sent += 1
+                    
+                    # Log stats periodically
+                    if self.frames_sent % 300 == 0:  # Every 10 seconds at 30 FPS
+                        queue_rate = (self.frames_queued / max(1, self.frames_sent)) * 100
+                        print(f"[{self.name}] Delivered {self.frames_sent} frames "
+                              f"(queued: {self.frames_queued}, dropped: {self.frames_dropped}, "
+                              f"queue/send ratio: {queue_rate:.1f}%, buffer: {len(self.frame_buffer)})")
+                    
+                    # Use PyVirtualCam's adaptive sleep for precise timing
+                    self.cam.sleep_until_next_frame()
+                else:
+                    # No frame available yet or cam not ready - wait briefly
+                    time.sleep(1.0 / self.target_fps)
+                        
+            except Exception as e:
+                print(f"[{self.name}] Error in delivery thread: {e}")
+                time.sleep(0.1)  # Brief pause on error
+        
+        print(f"[{self.name}] Frame delivery thread stopped")
 
     def stop(self):
-        """Stop virtual camera output"""
+        """Stop virtual camera output and delivery thread"""
         if not PYVIRTUALCAM_AVAILABLE:
             return
-            
+        
+        self.is_running = False
+        
+        # Stop delivery thread
+        if self.delivery_thread and self.delivery_thread.is_alive():
+            print(f"Stopping {self.name} delivery thread...")
+            self.stop_event.set()
+            self.delivery_thread.join(timeout=2.0)
+        
+        # Close camera
         if self.cam:
             try:
                 self.cam.close()
                 print(f"Virtual camera '{self.name}' stopped.")
+                print(f"Final stats: {self.frames_sent} frames sent, {self.frames_queued} queued, {self.frames_dropped} dropped")
             except Exception as e:
                 print(f"Error stopping virtual camera: {e}")
-        self.is_running = False
+        
         self.cam = None
+        self.frame_buffer.clear()
+        self.last_frame = None
 
 
 class VirtualWebcamManager:
@@ -204,17 +307,21 @@ class VirtualWebcamManager:
         if not self._started:
             return False
         
-        # Check actual state of outputs, not just our flag
+        # Check actual state of outputs AND their threads
         syphon_running = self.syphon and self.syphon.is_running
-        virtualcam_running = self.virtualcam and self.virtualcam.is_running
+        virtualcam_running = (self.virtualcam and 
+                             self.virtualcam.is_running and 
+                             self.virtualcam.delivery_thread and 
+                             self.virtualcam.delivery_thread.is_alive())
         
         return syphon_running or virtualcam_running
         
     def start(self, width, height, fps=30):
-        """Start all available outputs"""
-        # Don't restart if already running
-        if self._started and self.is_running:
-            return True
+        """Start all available outputs (only starts if not already started)"""
+        # If already started, don't call start() again on child outputs
+        # This prevents restart loops!
+        if self._started:
+            return self.is_running
             
         results = []
         
@@ -227,6 +334,7 @@ class VirtualWebcamManager:
             if self.virtualcam.start(width, height, fps):
                 results.append("Virtual Camera")
         
+        # Mark as started - this prevents calling start() multiple times
         self._started = True
         
         if results:

@@ -13,6 +13,7 @@ automatic reconnection, GUI control, and testing utilities.
 - 🧹 **Built-in system hygiene** – PTPCamera/Image Capture Extension kills, usbd warm reset, and Canon EOS Webcam Utility teardown before every connection.
 - 🧪 **Diagnostics & tests** – scripts mirror the production cleanup flow, plus integration tests for SDK loading and camera sessions.
 - 🖥️ **GUI-first workflow** – single “Connect & Start Live View” button, status feed, and graceful disconnect that keeps the SDK ready.
+- 📡 **Virtual webcam outputs** – simultaneous Syphon feed for OBS and PyVirtualCam bridge to the macOS-wide “OBS Virtual Camera,” so Google Meet/Zoom/Teams see the Canon feed without extra hardware.
 
 ---
 
@@ -80,6 +81,32 @@ Use **“Disconnect Camera”** in the GUI:
 - App-wide shutdown (window close) is the only time we terminate the SDK
 
 This mirrors the manual `test_camera_with_cleanup.sh` flow without leaving orphaned USB state.
+
+---
+
+## Virtual Webcam Outputs (OBS + Google Meet)
+
+Once live view starts, `src/virtual_webcam.py` spins up two outputs automatically:
+
+- **Syphon server** (`PolyCanonCam_Syphon`) – add a *Syphon Client* source in OBS to ingest the feed directly with minimal latency.
+- **PyVirtualCam** – publishes the same frames to the system-wide **OBS Virtual Camera** device so browsers and conferencing apps recognize it as a regular webcam.
+
+### Requirements
+
+1. `syphon-python` and `pyvirtualcam` (already listed in `requirements.txt`).
+2. OBS Studio ≥ 28 with the built-in *Virtual Camera* feature (macOS versions bundle it by default).
+
+### Typical Workflow
+
+1. Launch OBS and go to **Tools ▸ Start Virtual Camera** (or press the Virtual Camera button).
+2. Start `python app.py`, click **“Connect & Start Live View.”**
+3. Poly Canon Cam logs `Started outputs: Syphon, Virtual Camera` and begins streaming frames to both endpoints.
+4. In OBS, add **Sources ▸ Syphon Client ▸ PolyCanonCam_Syphon** if you want to composite/record.
+5. In Google Meet / Zoom / Teams / FaceTime, choose **OBS Virtual Camera** as the video source — the Canon live view will appear instantly.
+
+> **Tip:** The manager adapts to whatever EVF resolution your camera emits (e.g., 1024×576 on EOS R). OBS can upscale/letterbox as needed, while the browser sees the same format coming from OBS Virtual Camera.
+
+Stopping live view (or disconnecting) tears down both outputs so OBS/browsers immediately fall back to their previous sources.
 
 ---
 

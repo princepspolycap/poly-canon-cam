@@ -510,7 +510,11 @@ class CanonCameraConnection:
     def _handle_get_status_command(self):
         status_obj = self._get_status_internal()
         if status_obj:
-            self._send_data(MSG_STATUS_UPDATE, status_obj.to_dict())
+            status_dict = status_obj.to_dict()
+            # Override live_view_status with actual worker state, not just output_device flag
+            # This fixes the bug where output_device check returns "inactive" even when live view is running
+            status_dict["live_view_status"] = "active" if self.live_view_active else "inactive"
+            self._send_data(MSG_STATUS_UPDATE, status_dict)
         else:
             self._send_data(MSG_STATUS_UPDATE, CameraStatus().to_dict()) # Send default if error
 
@@ -920,7 +924,11 @@ class CanonCameraConnection:
             current_time = time.time()
             if self.camera and self.session_open and (current_time - last_status_check_time > 2.0):
                 status_obj = self._get_status_internal()
-                if status_obj: self._send_data(MSG_STATUS_UPDATE, status_obj.to_dict())
+                if status_obj:
+                    status_dict = status_obj.to_dict()
+                    # Override live_view_status with actual worker state
+                    status_dict["live_view_status"] = "active" if self.live_view_active else "inactive"
+                    self._send_data(MSG_STATUS_UPDATE, status_dict)
                 last_status_check_time = current_time
             
             if not self.live_view_active: # If not in active live view, sleep a bit more
