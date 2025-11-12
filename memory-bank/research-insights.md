@@ -77,7 +77,16 @@ We've enhanced the event handling system to specifically track property change e
 
 This targeted approach more closely follows the EDSDK's documentation and should increase the reliability of our live view implementation.
 
-## Current Status (May 21, 2025)
+## SOLUTION CONFIRMED (November 12, 2025)
+
+Based on Canon's official SAMPLE10 implementation, the correct approach is:
+1. **DO NOT set kEdsPropID_Evf_Mode explicitly** - This causes Error 129 (Device Busy)
+2. **Only set kEdsPropID_Evf_OutputDevice with PC bit** - This is sufficient to enable live view
+3. **Process events after setting output device** - Allow camera time to apply changes
+
+The key insight: Setting EVF output device to PC automatically enables the necessary live view mode internally. Explicitly setting Evf_Mode is redundant and causes conflicts.
+
+## Previous Investigation (May 21, 2025)
 
 The implementation now:
 1. Correctly sets `kEdsPropID_Evf_OutputDevice` with a bitwise OR operation

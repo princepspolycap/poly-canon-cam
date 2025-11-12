@@ -227,3 +227,18 @@ If you're still experiencing issues, try these specific steps:
 8. **Avoid SDK Termination**: The documentation specifies releasing resources with `EdsTerminateSDK()`, but this causes segmentation faults on macOS. Instead, just release individual resources in the proper order.
 
 By following this macOS-specific approach with proper runloop processing, retry logic, and safe resource handling, you should achieve much more reliable camera connections.
+
+## USB Snapshot Diagnostics
+
+- Run `ioreg -p IOUSB -l` (or a trimmed `ioreg -p IOUSB -l | sed -n '320,360p'`) to confirm the camera enumerates as `Canon Digital Camera` (vendor 1193) with `Device Speed = 3`, `USBPortType = 5`, and `kUSBCurrentConfiguration = 1`. This reflects macOS exposing only the still-image/PTP interface, which aligns with the SDK reporting that PC-screen EVF streaming is disabled until we explicitly switch it on.
+- Note that the body reports the generic serial string `"Canon Digital Camera"`. If multiple Canon bodies are connected simultaneously they appear identical to macOS, so always connect a single camera when debugging reconnect issues to avoid handle collisions.
+- Watch for extra child devices (for example, a Realtek “BillBoard Device” from a USB‑C dock). These can keep the `AppleT8122USBXHCI` controller busy and delay re-enumeration; connecting the camera directly to the Mac removes that contention point.
+
+## Clearing Stale macOS Attachments
+
+1. **Kill Apple imaging daemons**: `sudo killall PTPCamera` and `sudo killall "Image Capture Extension"` just before launching your SDK-based tooling. They respawn automatically later, but this releases any stale locks on the camera.
+2. **Bypass hubs when testing**: Plug the USB‑C cable straight into the Mac so the Canon node is the only active child under `AppleT8122USBXHCI`. This eliminates billboard/dock devices that can hijack bandwidth or power budgets.
+3. **Power-cycle the body**: Turn the camera off, unplug USB for 5–10 seconds, then reconnect and power on. Validate the fresh attachment with `ioreg -p IOUSB -l | sed -n '320,360p'` before rerunning `app.py` or `tests/test_camera_state.py`.
+4. **Re-run diagnostics after cleanup**: Once the hardware view looks correct, retry `python3.11 tests/test_camera_state.py`. If `EdsProcessEvent` still fails, inspect how the framework is loaded next (missing symbols often hint at a mismatched EDSDK build).
+
+Capturing the current USB state and clearing these background services before every test run keeps reconnection behavior predictable and prevents macOS from holding onto the camera behind the scenes.

@@ -117,10 +117,17 @@ STYLE_CONFIG = {
     },
     'Info.TLabel': {
         'configure': {
-            'background': COLORS['bg_medium'],
-            'foreground': COLORS['primary'],
-            'font': FONTS['subtitle'],
+            'background': COLORS['bg_light'],
+            'foreground': COLORS['text_secondary'],
+            'font': FONTS['caption'],
             'padding': 5
+        }
+    },
+    'Header.TFrame': {
+        'configure': {
+            'background': COLORS['bg_medium'],
+            'borderwidth': 0,
+            'relief': 'flat'
         }
     },
     'Error.TLabel': {
@@ -171,6 +178,20 @@ STYLE_CONFIG = {
         },
         'map': {
             'background': [('active', COLORS['accent_alt']), ('disabled', COLORS['bg_light'])],
+            'foreground': [('disabled', COLORS['text_disabled'])]
+        }
+    },
+    'Secondary.TButton': {
+        'configure': {
+            'font': FONTS['button'],
+            'background': COLORS['bg_medium'],
+            'foreground': COLORS['text_primary'],
+            'padding': [15, 8],
+            'relief': 'flat',
+            'borderwidth': 1
+        },
+        'map': {
+            'background': [('active', COLORS['bg_light']), ('disabled', COLORS['bg_light'])],
             'foreground': [('disabled', COLORS['text_disabled'])]
         }
     },
@@ -227,3 +248,7 @@ def setup_styles(root):
     # Configure horizontal separator
     style.configure("TSeparator", 
                    background=COLORS['separator'])
+
+def apply_modern_style(root):
+    """Apply modern styling to the application. Alias for setup_styles."""
+    return setup_styles(root)

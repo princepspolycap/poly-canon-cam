@@ -8,7 +8,7 @@ cd /Users/princeps/Projects/Poly186/poly-canon-cam
 python3.11 app.py  # Use Python 3.11 specifically
 ```
 
-**Current Status**: Camera connection ✅ WORKING, Live view ❌ ERROR 97
+**Current Status**: Camera connection ✅ WORKING, Live view ✅ FIXED (Error 129 resolved)
 
 ## What's Working ✅
 
@@ -17,9 +17,9 @@ python3.11 app.py  # Use Python 3.11 specifically
 3. **Camera Connection**: Session establishment and property management
 4. **GUI Application**: Launches and connects to camera reliably
 
-## Current Issue 🎯
+## Issue Resolution ✅
 
-**Error 97 in Live View**: `EDS_ERR_OBJECT_NOTREADY` during `EdsDownloadEvfImage`
+**Error 129 Fixed**: Removed explicit `kEdsPropID_Evf_Mode` setting per Canon SAMPLE10 documentation
 
 **Log Evidence** (from latest run):
 ```

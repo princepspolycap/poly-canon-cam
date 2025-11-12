@@ -36,12 +36,14 @@ kEdsCameraCommand_UILock = 0x00000000
 kEdsCameraCommand_UIUnLock = 0x00000001
 
 # Error Codes
-kEdsErr_StreamInternalError = 97      # Stream I/O error
-kEdsErr_ObjectNotReady = 41           # Object is not ready
-kEdsErr_DeviceBusy = 129
+EDS_ERR_OBJECT_NOTREADY = 97         # Image data set not ready for live view - CRITICAL FOR EVF
+kEdsErr_StreamInternalError = 97      # Stream I/O error (same as OBJECT_NOTREADY)
+kEdsErr_ObjectNotReady = 41           # General object not ready
+kEdsErr_DeviceBusy = 129              # Device is busy
 kEdsErr_DeviceNotFound = 2
 kEdsErr_DeviceInvalid = 3
 kEdsErr_SessionNotOpen = 8
+kEdsErr_SessionAlreadyOpen = 0x00002006
 kEdsErr_InvalidParameter = 6
 kEdsErr_MemoryFull = 7
 kEdsErr_CommunicationError = 41
@@ -88,6 +90,7 @@ CMD_SHUTDOWN = "shutdown" # Command to tell worker to clean up and exit
 # Message Types for communication from camera worker to GUI
 MSG_STATUS_UPDATE = "status_update"
 MSG_ERROR = "error"
+MSG_WARNING = "warning"
 MSG_CAMERA_INFO = "camera_info"
 MSG_LIVE_FRAME = "live_frame"
 MSG_CONNECTION_STATUS = "connection_status" # e.g., connected, disconnected, sdk_loaded, sdk_initialized, shutdown_complete

@@ -96,18 +96,30 @@ def check_requirements(verbose=True):
     
     log_func("[Startup] Checking Python dependencies...")
     
+    required_packages = []
+    optional_packages = []
+    
     try:
         import tkinter
         import cv2
         import numpy
         from PIL import Image
-        import syphon
-        log_func("[Startup] ✅ All Python dependencies available")
     except ImportError as e:
         print(f"\n❌ Error: Missing required package - {e.name}")
         print("Please install required packages:")
         print("pip install -r requirements.txt")
         return False
+    
+    # Check optional packages
+    try:
+        import syphon
+        optional_packages.append("syphon-python")
+    except ImportError:
+        log_func("[Startup] ℹ️  Syphon-python not available (optional)")
+    
+    log_func(f"[Startup] ✅ All required Python dependencies available")
+    if optional_packages:
+        log_func(f"[Startup] ✅ Optional packages: {', '.join(optional_packages)}")
 
     # Check for EDSDK
     edsdk_path = "./EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework/Versions/A/EDSDK"
@@ -212,14 +224,14 @@ def main():
             if verbose:
                 print("[Startup] 🔗 Auto-connect enabled, will attempt connection after GUI loads...")
             # Schedule auto-connect after GUI is fully loaded
-            app.root.after(1000, app.cmd_connect_camera)
+            app.root.after(1000, app.cmd_connect_and_start_live_view)
         
         # Configure the window before showing
         app.root.update_idletasks()
         
         if verbose:
             print("[Startup] ✅ GUI loaded successfully")
-            print("[Startup] 🎯 Click 'Connect Camera' to begin camera operations")
+            print("[Startup] 🎯 Click 'Connect & Start Live View' to begin camera operations")
         
         # Start the event loop
         app.root.mainloop()

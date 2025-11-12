@@ -2,13 +2,82 @@ import os
 import platform
 import time
 import subprocess
-import ctypes # Required for EDSDK types
+import ctypes # Required for EDSDK and CoreFoundation types
 
 # Import EDSDK constants - assuming they are in camera_constants
 # We need these for the new disconnect_and_cleanup_camera_resources function
 from .camera_constants import (
     EDS_ERR_OK, kEdsPropID_Evf_Mode, kEdsPropID_Evf_OutputDevice
 )
+
+# CoreFoundation symbols for macOS run loop pumping
+_CFRunLoopRunInMode = None
+_CFStringCreateWithCString = None
+_CFRelease = None
+_kCFAllocatorDefault = None
+_corefoundation_loaded = False
+_kCFStringEncodingUTF8 = 0x08000100
+
+
+def _ensure_corefoundation_loaded():
+    """Lazy-load CoreFoundation symbols required for run loop pumping."""
+    global _corefoundation_loaded, _CFRunLoopRunInMode, _CFStringCreateWithCString, _CFRelease, _kCFAllocatorDefault
+    if _corefoundation_loaded:
+        return
+    cf_path = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    cf = ctypes.CDLL(cf_path)
+    _CFRunLoopRunInMode = cf.CFRunLoopRunInMode
+    _CFRunLoopRunInMode.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_bool]
+    _CFRunLoopRunInMode.restype = ctypes.c_int32
+
+    _CFStringCreateWithCString = cf.CFStringCreateWithCString
+    _CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    _CFStringCreateWithCString.restype = ctypes.c_void_p
+
+    _CFRelease = cf.CFRelease
+    _CFRelease.argtypes = [ctypes.c_void_p]
+    _CFRelease.restype = None
+
+    _kCFAllocatorDefault = ctypes.c_void_p.in_dll(cf, "kCFAllocatorDefault")
+    _corefoundation_loaded = True
+
+
+def pump_macos_runloop(duration_sec=0.1, iterations=1, mode="kCFRunLoopDefaultMode", log_func=None):
+    """
+    Run the macOS run loop for a short period, as recommended by Canon's documentation
+    for reliable camera detection on Ventura/Sonoma (see "Notes on Developing Macintosh Applications").
+    """
+    log_fn = log_func if callable(log_func) else None
+
+    if platform.system() != "Darwin":
+        # On other OSes, a simple sleep is sufficient
+        time.sleep(duration_sec * max(iterations, 1))
+        return
+
+    try:
+        _ensure_corefoundation_loaded()
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"[CameraUtils] Failed to load CoreFoundation symbols: {exc}. Falling back to sleep.")
+        time.sleep(duration_sec * max(iterations, 1))
+        return
+
+    mode_bytes = mode.encode("utf-8")
+    for idx in range(max(iterations, 1)):
+        try:
+            mode_ref = _CFStringCreateWithCString(_kCFAllocatorDefault, mode_bytes, _kCFStringEncodingUTF8)
+            if mode_ref:
+                _CFRunLoopRunInMode(mode_ref, ctypes.c_double(duration_sec), False)
+                _CFRelease(mode_ref)
+            else:
+                time.sleep(duration_sec)
+            if log_fn:
+                log_fn(f"[CameraUtils] macOS runloop pulse {idx + 1}/{iterations}")
+        except Exception as exc:
+            if log_fn:
+                log_fn(f"[CameraUtils] Runloop pulse error: {exc}")
+            time.sleep(duration_sec)
+
 
 def cleanup_macos_camera_connection(extra_kill_canon_processes=True, verbose=True, send_log_func=print):
     """
@@ -35,6 +104,38 @@ def cleanup_macos_camera_connection(extra_kill_canon_processes=True, verbose=Tru
         return
     
     send_log_func_internal("[CameraUtils] Starting macOS-specific cleanup...")
+
+    # CRITICAL: Kill PTPCamera process that locks Canon devices
+    try:
+        if verbose:
+            send_log_func_internal("[CameraUtils] Attempting to kill PTPCamera process...")
+        result = subprocess.run(["killall", "PTPCamera"], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            if verbose:
+                send_log_func_internal("[CameraUtils] ✅ PTPCamera process killed successfully.")
+            time.sleep(0.5)
+        else:
+            if verbose:
+                send_log_func_internal("[CameraUtils] ℹ️  PTPCamera not running (or already terminated).")
+    except Exception as e:
+        if verbose:
+            send_log_func_internal(f"[CameraUtils] Exception killing PTPCamera: {e}")
+
+    # CRITICAL: Kill Image Capture Extension that maintains camera lock
+    try:
+        if verbose:
+            send_log_func_internal("[CameraUtils] Attempting to kill Image Capture Extension...")
+        result = subprocess.run(["killall", "Image Capture Extension"], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            if verbose:
+                send_log_func_internal("[CameraUtils] ✅ Image Capture Extension killed successfully.")
+            time.sleep(0.5)
+        else:
+            if verbose:
+                send_log_func_internal("[CameraUtils] ℹ️  Image Capture Extension not running (or already terminated).")
+    except Exception as e:
+        if verbose:
+            send_log_func_internal(f"[CameraUtils] Exception killing Image Capture Extension: {e}")
 
     # Reset macOS USB daemon
     try:
@@ -76,7 +177,7 @@ def cleanup_macos_camera_connection(extra_kill_canon_processes=True, verbose=Tru
                 send_log_func_internal(f"[CameraUtils] Exception while trying to kill Canon webcam processes: {e}")
 
     if verbose:
-        send_log_func_internal("[CameraUtils] macOS camera connection cleanup actions complete.")
+        send_log_func_internal("[CameraUtils] ✅ macOS camera connection cleanup actions complete.")
 
 
 def disconnect_and_cleanup_camera_resources(edsdk, camera_ref, session_open, live_view_active,

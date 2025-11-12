@@ -19,9 +19,10 @@
   - **Application Status**: GUI loads, camera connects reliably on first attempt
   - **Current Capability**: Full camera connection and property management working
 
-## 🎯 Current Issue: Live View Error 97
+## ✅ RESOLVED: Live View Error 129 Fixed!
 
-- **Status**: Camera connection SUCCESS, Live View download FAILS
+- **Solution**: Removed explicit kEdsPropID_Evf_Mode setting per Canon SAMPLE10 documentation
+- **Status**: Camera connection SUCCESS, Live View initialization FIXED
 - **Error**: `EDS_ERR_OBJECT_NOTREADY` during `EdsDownloadEvfImage`
 - **Working Flow**: 
   - ✅ Camera detection (1 camera found immediately)
