@@ -3,13 +3,19 @@ try:
     import numpy as np
     from syphon.utils.numpy import copy_image_to_mtl_texture
     SYPHON_AVAILABLE = True
-    # It's possible create_mtl_texture might be needed from syphon.utils.raw depending on how texture is managed per frame
-    # from syphon.utils.raw import create_mtl_texture
 except ImportError:
     SYPHON_AVAILABLE = False
     syphon = None
-    np = None
-    print("Warning: Syphon not available. Virtual webcam functionality disabled.") 
+    print("Warning: Syphon not available. Syphon output disabled.")
+
+try:
+    import pyvirtualcam
+    import numpy as np
+    PYVIRTUALCAM_AVAILABLE = True
+except ImportError:
+    PYVIRTUALCAM_AVAILABLE = False
+    pyvirtualcam = None
+    print("Warning: PyVirtualCam not available. Virtual camera output disabled.")
 
 class SyphonWebcamOutput:
     def __init__(self, server_name="CanonCamSyphon"):
@@ -61,17 +67,10 @@ class SyphonWebcamOutput:
         if not self.is_running or self.server is None:
             return
 
+        # Resize frame if dimensions don't match
         if frame_rgb.shape[1] != self.width or frame_rgb.shape[0] != self.height:
-            print("Frame dimensions do not match server configuration. Reconfiguring...")
-            # Basic reconfiguration. More robust handling might be needed.
-            # This might involve stopping and starting the server or recreating texture.
-            # For now, let's just log and skip.
-            # Ideally, texture should be managed to match frame_rgb dimensions.
-            # self.stop()
-            # self.start(frame_rgb.shape[1], frame_rgb.shape[0])
-            # if not self.is_running: return
-            print(f"Error: Frame size {frame_rgb.shape[1]}x{frame_rgb.shape[0]} does not match Syphon server {self.width}x{self.height}. Skipping frame.")
-            return
+            import cv2
+            frame_rgb = cv2.resize(frame_rgb, (self.width, self.height))
 
         try:
             # Ensure frame is RGBA for Syphon Metal texture
@@ -115,28 +114,170 @@ class SyphonWebcamOutput:
         self.server = None
         self.texture = None # Release texture
 
-if __name__ == '__main__':
-    # Basic test usage
-    if SYPHON_AVAILABLE:
-        syphon_output = SyphonWebcamOutput("TestSyphon")
-        syphon_output.start(640, 480)
+class PyVirtualCamOutput:
+    """Virtual camera output using PyVirtualCam (requires OBS Virtual Camera on macOS)"""
+    def __init__(self, name="PolyCanonCam"):
+        if not PYVIRTUALCAM_AVAILABLE:
+            print(f"Warning: PyVirtualCam not available. {name} virtual camera disabled.")
+            
+        self.name = name
+        self.cam = None
+        self.is_running = False
+        self.width = 0
+        self.height = 0
+        self.fps = 30
+
+    def start(self, width, height, fps=30):
+        """Start virtual camera output"""
+        if not PYVIRTUALCAM_AVAILABLE:
+            print("PyVirtualCam not available - cannot start virtual camera")
+            return False
+            
+        if self.is_running:
+            print("Virtual camera already running.")
+            return True
         
-        if syphon_output.is_running:
-            # Create a dummy RGBA frame (e.g., red)
-            import numpy as np
-            dummy_frame_rgba = np.zeros((480, 640, 4), dtype=np.uint8)
-            dummy_frame_rgba[:, :, 0] = 255  # Red channel
-            dummy_frame_rgba[:, :, 3] = 255  # Alpha channel
+        self.width = width
+        self.height = height
+        self.fps = fps
+        
+        try:
+            # On macOS, this requires OBS Virtual Camera to be installed
+            self.cam = pyvirtualcam.Camera(width, height, fps, fmt=pyvirtualcam.PixelFormat.RGB)
+            self.is_running = True
+            print(f"Virtual camera '{self.name}' started at {width}x{height} @ {fps}fps")
+            print(f"Device: {self.cam.device}")
+            return True
+        except Exception as e:
+            print(f"Failed to start virtual camera: {e}")
+            print("On macOS: Install OBS Studio and start 'Tools > Start Virtual Camera'")
+            self.cam = None
+            self.is_running = False
+            return False
+
+    def send_frame(self, frame_rgb):
+        """Send RGB frame to virtual camera"""
+        if not PYVIRTUALCAM_AVAILABLE or not self.is_running or self.cam is None:
+            return
             
-            syphon_output.send_frame(dummy_frame_rgba)
-            print("Sent dummy frame.")
+        try:
+            # PyVirtualCam expects RGB format (H, W, 3)
+            if frame_rgb.shape[2] == 4:  # RGBA to RGB
+                frame_rgb = frame_rgb[:, :, :3]
             
-            import time
-            time.sleep(2)
-            import time
-            time.sleep(2)
-            syphon_output.stop()
+            # Verify dimensions match - resize if needed (should not happen if properly initialized)
+            if frame_rgb.shape[0] != self.height or frame_rgb.shape[1] != self.width:
+                import cv2
+                frame_rgb = cv2.resize(frame_rgb, (self.width, self.height))
+            
+            self.cam.send(frame_rgb)
+            
+        except Exception as e:
+            print(f"Error sending frame to virtual camera: {e}")
+
+    def stop(self):
+        """Stop virtual camera output"""
+        if not PYVIRTUALCAM_AVAILABLE:
+            return
+            
+        if self.cam:
+            try:
+                self.cam.close()
+                print(f"Virtual camera '{self.name}' stopped.")
+            except Exception as e:
+                print(f"Error stopping virtual camera: {e}")
+        self.is_running = False
+        self.cam = None
+
+
+class VirtualWebcamManager:
+    """Manages both Syphon and PyVirtualCam outputs simultaneously"""
+    def __init__(self, name="PolyCanonCam"):
+        self.name = name
+        self.syphon = SyphonWebcamOutput(f"{name}_Syphon") if SYPHON_AVAILABLE else None
+        self.virtualcam = PyVirtualCamOutput(name) if PYVIRTUALCAM_AVAILABLE else None
+        self._started = False
+        
+    @property
+    def is_running(self):
+        """Check if any output is actually running"""
+        if not self._started:
+            return False
+        
+        # Check actual state of outputs, not just our flag
+        syphon_running = self.syphon and self.syphon.is_running
+        virtualcam_running = self.virtualcam and self.virtualcam.is_running
+        
+        return syphon_running or virtualcam_running
+        
+    def start(self, width, height, fps=30):
+        """Start all available outputs"""
+        # Don't restart if already running
+        if self._started and self.is_running:
+            return True
+            
+        results = []
+        
+        if self.syphon:
+            self.syphon.start(width, height)
+            if self.syphon.is_running:
+                results.append("Syphon")
+        
+        if self.virtualcam:
+            if self.virtualcam.start(width, height, fps):
+                results.append("Virtual Camera")
+        
+        self._started = True
+        
+        if results:
+            print(f"Started outputs: {', '.join(results)}")
         else:
-            print("Failed to start Syphon server.")
+            print("No virtual outputs available")
+            
+        return self.is_running
+    
+    def send_frame(self, frame_rgb):
+        """Send frame to all active outputs"""
+        if not self._started:
+            return
+            
+        if self.syphon and self.syphon.is_running:
+            self.syphon.send_frame(frame_rgb)
+            
+        if self.virtualcam and self.virtualcam.is_running:
+            self.virtualcam.send_frame(frame_rgb)
+    
+    def stop(self):
+        """Stop all outputs"""
+        if self.syphon:
+            self.syphon.stop()
+        if self.virtualcam:
+            self.virtualcam.stop()
+        self._started = False
+
+
+if __name__ == '__main__':
+    # Test usage
+    import time
+    import numpy as np
+    
+    manager = VirtualWebcamManager("TestOutput")
+    
+    if manager.start(1920, 1080, 30):
+        print("Sending test frames for 5 seconds...")
+        
+        # Create a test pattern (gradient)
+        for i in range(150):  # 5 seconds at 30fps
+            frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            # Moving gradient
+            frame[:, :, 0] = (i * 5) % 255  # Red channel
+            frame[:, :, 1] = 128  # Green channel
+            frame[:, :, 2] = 255 - ((i * 5) % 255)  # Blue channel
+            
+            manager.send_frame(frame)
+            time.sleep(1/30)  # 30fps
+            
+        manager.stop()
+        print("Test complete")
     else:
-        print("Syphon not available - skipping test")
+        print("Failed to start any virtual outputs")

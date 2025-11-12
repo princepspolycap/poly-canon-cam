@@ -233,7 +233,15 @@ class CameraControlPanel:
         self.camera_command_queue = queue.Queue()
         self.camera_data_queue = queue.Queue()
         
-        self.syphon_output = None
+        # Initialize virtual webcam manager
+        try:
+            from .virtual_webcam import VirtualWebcamManager
+            self.virtual_webcam = VirtualWebcamManager("PolyCanonCam")
+            self.log_display.log("Virtual webcam manager initialized")
+        except Exception as e:
+            self.virtual_webcam = None
+            self.log_display.log(f"Virtual webcam not available: {e}", level="warning")
+        
         self.is_running_live_view = False
         self.current_image_ref = None
         self.frame_monitor = FrameRateMonitor()
@@ -343,11 +351,18 @@ class CameraControlPanel:
                 self.stop_lv_button.config(state=tk.NORMAL)
                 self.status_label.config(text="🟢 Connected - Live View Active")
                 self.log_display.log("Live view is now active")
+                
+                # Note: Virtual webcam will be started when first frame arrives (auto-detect size)
             else:
                 self.is_running_live_view = False
                 self.stop_lv_button.config(state=tk.DISABLED)
                 if self.camera_connection:
                     self.status_label.config(text="🟢 Connected")
+                
+                # Stop virtual webcam when live view stops
+                if self.virtual_webcam and self.virtual_webcam.is_running:
+                    self.virtual_webcam.stop()
+                    self.log_display.log("Virtual camera stopped")
 
     def _handle_live_frame_message(self, payload):
         frame_data = payload.get("frame_data")
@@ -381,6 +396,19 @@ class CameraControlPanel:
         try:
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Initialize virtual webcam on first frame only
+            if self.virtual_webcam and not self.virtual_webcam.is_running:
+                # Auto-detect frame size from first frame
+                h, w = frame_rgb.shape[:2]
+                if self.virtual_webcam.start(w, h, 30):
+                    self.log_display.log(f"✓ Virtual camera started at {w}x{h} (OBS Virtual Camera)", level="success")
+                else:
+                    self.log_display.log("Virtual camera not available - install OBS and start Virtual Camera", level="warning")
+            
+            # Send frame to virtual webcam
+            if self.virtual_webcam and self.virtual_webcam.is_running:
+                self.virtual_webcam.send_frame(frame_rgb)
             
             # Get canvas size
             canvas_width = self.canvas.winfo_width()
@@ -486,6 +514,12 @@ class CameraControlPanel:
         """Stop live view"""
         if self.camera_connection:
             self.log_display.log("Stopping live view...")
+            
+            # Stop virtual webcam first
+            if self.virtual_webcam and self.virtual_webcam.is_running:
+                self.virtual_webcam.stop()
+                self.log_display.log("Virtual camera stopped")
+            
             self.camera_command_queue.put({
                 "action": "stop_live_view",
                 "data": {}
@@ -522,6 +556,10 @@ class CameraControlPanel:
         """Handle window closing"""
         if self.camera_connection:
             self.log_display.log("Closing application...")
+            
+            # Stop virtual webcam first
+            if self.virtual_webcam and self.virtual_webcam.is_running:
+                self.virtual_webcam.stop()
             
             # First disconnect camera if connected
             if self.is_running_live_view:
