@@ -367,16 +367,33 @@ class CanonCameraConnection:
         self._send_log(f"Opening session with camera (ref: {temp_camera})...")
         
         # Try closing any existing session first (in case of stale session)
-        with self._event_lock:
-            close_err = self.edsdk.EdsCloseSession(temp_camera)
+        # CRITICAL: Don't hold lock during EdsCloseSession - may need runloop
+        close_err = self.edsdk.EdsCloseSession(temp_camera)
         if close_err == EDS_ERR_OK:
             self._send_log("Closed pre-existing session on camera.")
             time.sleep(0.2)  # Brief delay after closing
             self._process_events()
         
-        # Now open the session
-        with self._event_lock:
-            err = self.edsdk.EdsOpenSession(temp_camera)
+        # CRITICAL: EdsOpenSession MUST NOT hold the event lock!
+        # It's a blocking call that requires macOS runloop to pump events.
+        # Calling it inside a lock causes deadlock with _process_events().
+        import threading
+        import sys
+        print(f"[DEBUG] Thread ID: {threading.get_ident()}, Process ID: {os.getpid()}")
+        print(f"[DEBUG] About to call EdsOpenSession (camera ref: {temp_camera})...")
+        
+        # For packaged apps, pump macOS events before EdsOpenSession
+        if sys.platform == 'darwin':
+            print("[DEBUG] Pumping macOS runloop before EdsOpenSession...")
+            camera_utils.pump_macos_runloop(duration_sec=0.1, iterations=5)
+        
+        err = self.edsdk.EdsOpenSession(temp_camera)
+        print(f"[DEBUG] EdsOpenSession returned: {err}")
+        
+        # Pump events again after opening
+        if sys.platform == 'darwin':
+            camera_utils.pump_macos_runloop(duration_sec=0.1, iterations=5)
+        
         if err != EDS_ERR_OK:
             self._send_error(f"Failed to open session with camera (Error code: {err} / 0x{err:04x})", 
                            code=err, 
@@ -789,8 +806,9 @@ class CanonCameraConnection:
                     self.edsdk.EdsSetCameraStateEventHandler(self.camera, 0, None, None)
                     self.edsdk.EdsSetPropertyEventHandler(self.camera, 0, None, None)
 
-                with self._event_lock:
-                    self.edsdk.EdsCloseSession(self.camera)
+                # CRITICAL: EdsCloseSession must NOT hold the event lock!
+                # It may require macOS runloop to pump events, causing deadlock with _process_events()
+                self.edsdk.EdsCloseSession(self.camera)
                 self._send_log("Camera session closed.")
                 
                 # CRITICAL: Process events after closing session to ensure camera acknowledges

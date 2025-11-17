@@ -160,7 +160,7 @@ def perform_system_cleanup(verbose=True):
         cleanup_macos_camera_connection(
             extra_kill_canon_processes=True,
             verbose=verbose,
-            send_log_func=lambda msg: log_func(f"[CameraUtils] {msg}")
+            send_log_func=log_func  # Don't add extra prefix - camera_utils already adds [CameraUtils]
         )
         log_func("[Startup] ✅ System cleanup completed")
         return True

@@ -145,6 +145,7 @@ called manually from scripts/tests.
 | `EdsGetChildCount` always returns 0 | Camera still locked by macOS services | Run `test_camera_with_cleanup.sh`, verify `ioreg` shows SuperSpeed + configuration 1 |
 | Error 129 (live view) | Camera in video/scene mode or EVF output not confirmed | Switch to P/Tv/Av/M, look for log “Confirmed EVF output device now 0x03” |
 | `EdsTerminateSDK` error 2 on shutdown | macOS race after cleanup | Harmless on quit; ensure we only terminate during app exit |
+| GUI suddenly says “Live view stopped” while frames still update | Status payload missing `live_view_status` due to worker bug | Worker now injects the authoritative `live_view_active` flag into every status update; make sure you’re on the latest build if you still see spurious stop/start logs. |
 
 See `docs/CAMERA_CLEANUP_GUIDE.md` for a deeper troubleshooting checklist and
 USB inspection commands.

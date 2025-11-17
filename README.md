@@ -1,19 +1,32 @@
-# Poly Canon Cam
+# 🎥 Poly Canon Cam
 
-Professional macOS tooling for Canon EOS live view capture, built on EDSDK 13.19.10.  
-The app wraps Canon's low-level APIs in a resilient worker that handles USB cleanup,
-automatic reconnection, GUI control, and testing utilities.
+**Turn your Canon EOS camera into a professional webcam for macOS**
+
+Skip the expensive HDMI capture cards and buggy Canon EOS Webcam Utility. Get rock-solid 30 FPS live view streaming directly from your Canon camera to OBS, Google Meet, Zoom, Teams, and any video app on macOS.
+
+Built with Canon's official EDSDK 13.19.10, this native macOS app handles all the USB quirks, cleanup headaches, and frame delivery so you can focus on looking professional in your calls.
 
 ---
 
-## Highlights
+## ✨ Why Use This?
 
-- 🔁 **Reliable connect/disconnect loop** – worker thread stays alive, SDK remains loaded, and every connection attempt performs a full macOS camera cleanup + stabilization delay.
-- 🎥 **Low-latency live view** – EVF output routing follows Canon’s SAMPLE10 pattern (PC bit only) with event-driven confirmation.
-- 🧹 **Built-in system hygiene** – PTPCamera/Image Capture Extension kills, usbd warm reset, and Canon EOS Webcam Utility teardown before every connection.
-- 🧪 **Diagnostics & tests** – scripts mirror the production cleanup flow, plus integration tests for SDK loading and camera sessions.
-- 🖥️ **GUI-first workflow** – single “Connect & Start Live View” button, status feed, and graceful disconnect that keeps the SDK ready.
-- 📡 **Virtual webcam outputs** – simultaneous Syphon feed for OBS and PyVirtualCam bridge to the macOS-wide “OBS Virtual Camera,” so Google Meet/Zoom/Teams see the Canon feed without extra hardware.
+### The Problem with Canon's Official Solution
+Canon EOS Webcam Utility is... rough. Random crashes, USB conflicts with macOS services, frame drops, and zero visibility into what's going wrong. HDMI capture cards work but add latency and cost $150+.
+
+### This Solution
+- 🔁 **Rock-solid USB connection** – Automatically kills competing macOS services (PTPCamera, Image Capture Extension) before every connection
+- 🎥 **True 30 FPS streaming** – Direct EVF live view from camera sensor, no HDMI lag
+- 📡 **Dual output system** – Syphon server for OBS + PyVirtualCam bridge to system-wide "OBS Virtual Camera"
+- 🧹 **Smart cleanup** – Handles USB resets, stale sessions, and graceful reconnection without app restart
+- 🖥️ **Dead-simple GUI** – One button: "Connect & Start Live View." That's it.
+- 🔧 **Developer-friendly** – Full debug logs, test suite, and troubleshooting scripts included
+
+### Works Everywhere
+Once connected, your Canon appears as **"OBS Virtual Camera"** in every video app:
+- ✅ Google Meet / Zoom / Microsoft Teams
+- ✅ OBS Studio (via Syphon for zero-copy streaming)
+- ✅ FaceTime / Photo Booth / QuickTime
+- ✅ Any app that uses macOS camera APIs
 
 ---
 
@@ -30,6 +43,8 @@ See `docs/Canon_Camera_Setup_Guide.md` for the camera-side menu checklist.
 
 ## Quick Start
 
+### Option 1: Run from Source (Development)
+
 ```bash
 git clone https://github.com/yourusername/poly-canon-cam.git
 cd poly-canon-cam
@@ -41,12 +56,25 @@ pip install -r requirements.txt
 ```
 
 > **macOS security prompt?**  
-> If you get “library load disallowed by system policy”, clear the quarantine flag:
+> If you get "library load disallowed by system policy", clear the quarantine flag:
 > ```bash
 > find "EDSDK 13.19.10 Macintosh/Framework/EDSDK.framework" \
 >   -exec xattr -d com.apple.quarantine {} \; 2>/dev/null
 > ```
 > or allow the binary from **System Settings ▸ Privacy & Security**.
+
+### Option 2: Build as macOS Application
+
+```bash
+# Build a standalone .app bundle
+chmod +x build_app.sh
+./build_app.sh
+
+# Launch the app
+open "dist/Poly Canon Cam.app"
+```
+
+See **[PACKAGING.md](PACKAGING.md)** for the full workflow (icons, DMG, signing) and **[BUILD.md](BUILD.md)** for the one-page cheatsheet + verification checklist.
 
 
 ### Verify the SDK
@@ -89,7 +117,8 @@ This mirrors the manual `test_camera_with_cleanup.sh` flow without leaving orpha
 Once live view starts, `src/virtual_webcam.py` spins up two outputs automatically:
 
 - **Syphon server** (`PolyCanonCam_Syphon`) – add a *Syphon Client* source in OBS to ingest the feed directly with minimal latency.
-- **PyVirtualCam** – publishes the same frames to the system-wide **OBS Virtual Camera** device so browsers and conferencing apps recognize it as a regular webcam.
+- **PyVirtualCam** – publishes the same frames to the system-wide **OBS Virtual Camera** device so browsers and conferencing apps recognize it as a regular webcam.  
+  A dedicated delivery thread keeps a 10-frame ring buffer and pushes frames at a strict 24–30 FPS cadence, so OBS Virtual Camera never falls back to its logo even if the Canon feed wobbles.
 
 ### Requirements
 
@@ -98,15 +127,23 @@ Once live view starts, `src/virtual_webcam.py` spins up two outputs automaticall
 
 ### Typical Workflow
 
-1. Launch OBS and go to **Tools ▸ Start Virtual Camera** (or press the Virtual Camera button).
+1. Launch OBS and go to **Tools ▸ Start Virtual Camera** (or press the Virtual Camera button) **before** opening browsers that need the feed.
 2. Start `python app.py`, click **“Connect & Start Live View.”**
-3. Poly Canon Cam logs `Started outputs: Syphon, Virtual Camera` and begins streaming frames to both endpoints.
+3. Poly Canon Cam logs `Started outputs: Syphon, Virtual Camera` plus frame-delivery stats once every ~10 s.
 4. In OBS, add **Sources ▸ Syphon Client ▸ PolyCanonCam_Syphon** if you want to composite/record.
 5. In Google Meet / Zoom / Teams / FaceTime, choose **OBS Virtual Camera** as the video source — the Canon live view will appear instantly.
 
 > **Tip:** The manager adapts to whatever EVF resolution your camera emits (e.g., 1024×576 on EOS R). OBS can upscale/letterbox as needed, while the browser sees the same format coming from OBS Virtual Camera.
 
-Stopping live view (or disconnecting) tears down both outputs so OBS/browsers immediately fall back to their previous sources.
+Stopping live view (or disconnecting) tears down both outputs so OBS/browsers immediately fall back to their previous sources. The GUI also keeps a `_virtual_webcam_initialized` guard so the virtual camera only restarts when you explicitly stop live view.
+
+#### Troubleshooting Virtual Camera Output
+
+| Symptom | Fix |
+| --- | --- |
+| OBS Virtual Camera shows its logo intermittently | Make sure the app log shows `[PolyCanonCam] Frame delivery thread started` only once. If it restarts, close extra app instances and verify OBS Virtual Camera is running before starting Poly Canon Cam. |
+| Browser cannot see OBS Virtual Camera | Launch OBS first, start its Virtual Camera, then launch Poly Canon Cam so PyVirtualCam can acquire the same device. |
+| Frames look stretched | OBS Virtual Camera reports the Canon EVF size (e.g., 1024×576). Use OBS to scale or letterbox before forwarding to Meet/Zoom. |
 
 ---
 

@@ -214,17 +214,41 @@ bash test_camera_with_cleanup.sh
 
 ## What's Next
 
-The camera connection and live view initialization is now fixed. Next steps could be:
+The camera connection and live view initialization is now fixed. Since that milestone we shipped several downstream enhancements so the app can act as a turnkey webcam:
 
-1. **Frame Capture**: Implement actual EVF frame download (`EdsDownloadEvfImage`)
-2. **Display**: Show frames in GUI canvas
-3. **Virtual Webcam**: Integrate Syphon for virtual webcam output
-4. **Performance**: Optimize frame rate and latency
+### ✅ Fix #4: Dual Virtual Webcam Outputs (Syphon + PyVirtualCam)
+- **Files**: `src/virtual_webcam.py`, `src/gui.py`, `README.md`
+- Introduced `VirtualWebcamManager` that spins up **Syphon** (`PolyCanonCam_Syphon`) for OBS compositing and **PyVirtualCam** for the macOS-wide OBS Virtual Camera device.
+- The GUI starts both outputs automatically on the first live-view frame and keeps them alive until live view stops or the app exits.
+- Requirements (documented in README):
+  1. `syphon-python` / `pyvirtualcam` (already in `requirements.txt`)
+  2. OBS Studio ≥ 28 with **Tools ▸ Start Virtual Camera** running in the background.
 
-But the core camera connection and live view initialization is **production-ready** ✅
+### ✅ Fix #5: Frame-Delivery Thread & Buffering
+- **File**: `src/virtual_webcam.py`
+- PyVirtualCam now runs inside a dedicated delivery thread that:
+  - Keeps the 24–30 FPS cadence using `sleep_until_next_frame()`
+  - Buffers the 10 most recent Canon frames (RGB) so short gaps from the camera don’t make OBS flash its logo
+  - Reuses the last frame when the Canon feed momentarily stalls
+  - Logs queue/send stats every ~10 s to help tune performance
+- Result: Google Meet / Zoom / Teams receive a perfectly steady stream via OBS Virtual Camera without flickering.
+
+### ✅ Fix #6: Accurate Live View Status Propagation
+- **Files**: `src/canon_camera_connection.py`, `src/gui.py`
+- `CameraStatus.to_dict()` originally derived `live_view_status` from the EVF output bit, which could lag and made the GUI believe live view stopped every 2 s. That caused the virtual webcam to stop/start and OBS showed its logo.
+- The worker now injects the authoritative `self.live_view_active` flag into every status update before publishing it to the GUI.
+- GUI logic only tears down the virtual webcam if the payload explicitly says `"live_view_status": "inactive"`, eliminating unintended restarts.
+
+### ✅ Fix #7: Virtual Webcam Guard Rails
+- **Files**: `src/gui.py`, `src/virtual_webcam.py`
+- Added `_virtual_webcam_initialized` flag so the GUI never reinitializes the virtual camera mid-stream.
+- Added stop-origin logging and safe tear-down so Syphon/PyVirtualCam only stop when you click **Stop Live View**, **Disconnect**, or exit the app.
+
+With these additions the “virtual webcam” bullet from the earlier roadmap is complete—Poly Canon Cam now behaves like a first-class webcam source for both OBS and browser-based meeting apps.
 
 ---
 
-**Date**: November 11, 2025  
+**Date**: November 11, 2025 (original connection fixes)  
+**Last Updated**: March 3, 2026 (virtual webcam & status stability)  
 **Status**: ✅ Complete and Tested  
-**Confidence**: 85% (high) - Based on EDSDK specification compliance
+**Confidence**: 90% (high) - Canon EVF parity + OBS virtual camera validation

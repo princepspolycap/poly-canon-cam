@@ -31,3 +31,10 @@ Thumbs.db
 # Project specific
 *.log
 EDSDK 13.18.40 Macintosh/
+
+# Build artifacts (py2app)
+build/
+dist/
+*.egg-info/
+*.icns
+logo.iconset/

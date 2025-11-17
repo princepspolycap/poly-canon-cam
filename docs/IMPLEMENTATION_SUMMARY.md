@@ -75,6 +75,29 @@ self._process_events()
 
 **Effect**: Tests can reliably detect camera presence
 
+### Solution 4: Dual Virtual Webcam Outputs
+
+**Files**: `src/virtual_webcam.py`, `src/gui.py`, `README.md`
+
+- Added a `VirtualWebcamManager` that boots a Syphon Metal server and a PyVirtualCam instance when the first live-view frame arrives.
+- GUI maintains a `_virtual_webcam_initialized` flag so OBS Virtual Camera is opened only once per live-view session.
+- README documents the workflow (start OBS Virtual Camera first, then Poly Canon Cam).
+
+### Solution 5: Frame-Delivery Thread & Buffer
+
+**File**: `src/virtual_webcam.py`
+
+- PyVirtualCam now uses a dedicated delivery thread with a 10-frame deque.
+- Thread calls `cam.sleep_until_next_frame()` to keep a solid 30 FPS and replays the last frame during Canon stalls.
+- Logs queue/send stats, drops, and buffer depth to help troubleshoot.
+
+### Solution 6: Accurate Live View Status Propagation
+
+**Files**: `src/canon_camera_connection.py`, `src/gui.py`
+
+- Worker injects the authoritative `self.live_view_active` flag into every status update before it hits the GUI.
+- GUI only stops the virtual webcam when `live_view_status == "inactive"`, preventing 2-second restart loops that previously caused OBS flicker.
+
 ## Verification
 
 ### Test 1: System Cleanup Works
@@ -102,6 +125,18 @@ After fix:
 - Event processing between changes
 - Proper state transitions
 - Result: ✅ Live view ready
+
+### Test 4: Virtual Webcam Stability
+```
+[PolyCanonCam] Frame delivery thread started (target: 30 FPS)
+[PolyCanonCam] Delivered 300 frames (queued: 309, dropped: 2, queue/send ratio: 103.0%, buffer: 8)
+```
+
+### Test 5: GUI Status Handling
+```
+MSG_STATUS_UPDATE {'live_view_status': 'active', ...}
+# (no automatic stop/restart messages every 2 seconds anymore)
+```
 
 ## Data Flow: Before vs After
 
@@ -160,12 +195,16 @@ camera_connection.py worker thread
   │  ├─ _process_events() × 2 ✅ FIX
   │  └─ ✅ Live view started!
   │
+  └─ Frame distribution
+     ├─ Syphon server (PolyCanonCam_Syphon)
+     └─ PyVirtualCam delivery thread → OBS Virtual Camera → Google Meet / Zoom
+  │
   └─ Camera disconnects
      └─ cleanup_macos_camera_connection()
-        ├─ Stop live view
+        ├─ Stop live view (sets EVF output -> LCD)
+        ├─ Stop virtual webcam outputs
         ├─ Close session
-        ├─ Terminate EDSDK
-        └─ Perform macOS cleanup
+        └─ SDK stays resident for fast reconnect
 ```
 
 ## Files Modified
@@ -173,15 +212,17 @@ camera_connection.py worker thread
 1. **`src/canon_camera_connection.py`**
    - `_handle_start_live_view_command()` - Added event processing
    - `_handle_stop_live_view_command()` - Added event processing
-   - Lines: ~407-580
-
+   - `_get_status_internal()` / worker loop - Inject live view status field
 2. **`src/camera_utils.py`**
    - `cleanup_macos_camera_connection()` - Added PTPCamera/Image Capture Extension kills
-   - Lines: ~38-110
-
 3. **`tests/test_camera_connection.py`**
    - `check_usb_devices()` - Changed to use ioreg
-   - Lines: ~65-100
+4. **`src/virtual_webcam.py`**
+   - Added `VirtualWebcamManager`, Syphon + PyVirtualCam outputs, dedicated delivery thread, buffering, telemetry
+5. **`src/gui.py`**
+   - Virtual webcam initialization guard, stop handler integration, status handling fixes
+6. **`README.md` & `docs/FIXES_IMPLEMENTED.md`**
+   - Documented the new virtual webcam workflow and troubleshooting steps
 
 ## Testing Procedure
 
@@ -196,7 +237,8 @@ python3.11 tests/test_camera_connection.py
 python3.11 app.py
 
 # In GUI: Click "Connect Camera" then "Start Live View"
-# Expected: Live view starts without Error 129
+# Expected: Live view starts without Error 129, logs "Started outputs: Syphon, Virtual Camera"
+# OBS Virtual Camera shows the Canon feed without flashing its logo
 ```
 
 ## Success Criteria
