@@ -1,12 +1,33 @@
-try:
-    import syphon
-    import numpy as np
-    from syphon.utils.numpy import copy_image_to_mtl_texture
-    SYPHON_AVAILABLE = True
-except ImportError:
-    SYPHON_AVAILABLE = False
+import os
+import sys
+
+# Syphon can crash the packaged app on newer macOS if its bundled framework
+# fails code signature validation. Default: disable Syphon inside the frozen
+# app unless explicitly enabled via env.
+_running_in_bundle = getattr(sys, "frozen", False) or "PY2APP_BUNDLE" in os.environ
+_syphon_env_disable = os.environ.get("POLYCANON_DISABLE_SYPHON", "").lower() in ("1", "true", "yes")
+_syphon_env_enable = os.environ.get("POLYCANON_ENABLE_SYPHON", "").lower() in ("1", "true", "yes")
+_skip_syphon_import = (_running_in_bundle and not _syphon_env_enable) or _syphon_env_disable
+
+if _skip_syphon_import:
     syphon = None
-    print("Warning: Syphon not available. Syphon output disabled.")
+    SYPHON_AVAILABLE = False
+    print("Syphon import skipped (packaged build). Set POLYCANON_ENABLE_SYPHON=1 to enable.")
+else:
+    try:
+        import syphon
+        import numpy as np
+        from syphon.utils.numpy import copy_image_to_mtl_texture
+        SYPHON_AVAILABLE = True
+    except ImportError:
+        SYPHON_AVAILABLE = False
+        syphon = None
+        print("Warning: Syphon not available. Syphon output disabled.")
+    except Exception as e:
+        # Any failure here can kill the app when code signing is strict; fall back gracefully.
+        SYPHON_AVAILABLE = False
+        syphon = None
+        print(f"Syphon disabled due to load failure: {e}")
 
 try:
     import pyvirtualcam
@@ -19,7 +40,141 @@ except ImportError:
 
 import threading
 import time
+import subprocess
+import platform
+import logging
 from collections import deque
+
+logger = logging.getLogger(__name__)
+
+
+def get_macos_version():
+    """
+    Get macOS version as tuple (major, minor, patch).
+    Returns None if not macOS or version cannot be determined.
+    """
+    if platform.system() != 'Darwin':
+        return None
+    
+    try:
+        version_str = platform.mac_ver()[0]
+        if version_str:
+            parts = version_str.split('.')
+            return tuple(int(p) for p in parts[:3])
+    except (ValueError, IndexError):
+        pass
+    
+    return None
+
+
+def get_obs_version():
+    """
+    Get installed OBS Studio version.
+    Returns version string (e.g., '30.2.1') or None if not installed.
+    """
+    obs_paths = [
+        '/Applications/OBS.app',
+        '/Applications/OBS Studio.app',
+    ]
+    
+    for obs_path in obs_paths:
+        plist_path = f"{obs_path}/Contents/Info.plist"
+        try:
+            result = subprocess.run(
+                ['defaults', 'read', plist_path, 'CFBundleShortVersionString'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            continue
+    
+    return None
+
+
+def check_obs_requirements():
+    """
+    Check if OBS Studio meets requirements for PyVirtualCam on macOS.
+    
+    Requirements:
+    - macOS 13+ requires OBS 30+ (uses CMIOExtension)
+    - macOS 12 and earlier can use OBS 26+ (uses DAL plugin)
+    - OBS Virtual Camera must be activated once before use
+    
+    Returns:
+        dict: {
+            'macos_version': tuple or None,
+            'obs_version': str or None,
+            'obs_major': int or None,
+            'requirements_met': bool,
+            'warnings': list[str],
+            'errors': list[str]
+        }
+    """
+    result = {
+        'macos_version': None,
+        'obs_version': None,
+        'obs_major': None,
+        'requirements_met': True,
+        'warnings': [],
+        'errors': []
+    }
+    
+    # Get macOS version
+    macos_ver = get_macos_version()
+    result['macos_version'] = macos_ver
+    
+    if macos_ver is None:
+        # Not macOS - requirements don't apply
+        return result
+    
+    # Get OBS version
+    obs_version = get_obs_version()
+    result['obs_version'] = obs_version
+    
+    if obs_version is None:
+        result['errors'].append(
+            "OBS Studio not found. Install OBS from https://obsproject.com"
+        )
+        result['requirements_met'] = False
+        return result
+    
+    # Parse OBS major version
+    try:
+        result['obs_major'] = int(obs_version.split('.')[0])
+    except (ValueError, IndexError):
+        result['warnings'].append(f"Could not parse OBS version: {obs_version}")
+        return result
+    
+    # Check version requirements based on macOS version
+    macos_major = macos_ver[0] if macos_ver else 0
+    
+    if macos_major >= 13:
+        # macOS 13+ requires OBS 30+ for CMIOExtension support
+        if result['obs_major'] < 30:
+            result['errors'].append(
+                f"macOS {macos_major} requires OBS 30+, found OBS {obs_version}. "
+                f"Update OBS from https://obsproject.com"
+            )
+            result['requirements_met'] = False
+    elif macos_major >= 10:
+        # macOS 10-12 requires OBS 26+ for DAL plugin
+        if result['obs_major'] < 26:
+            result['errors'].append(
+                f"macOS {macos_major} requires OBS 26+, found OBS {obs_version}. "
+                f"Update OBS from https://obsproject.com"
+            )
+            result['requirements_met'] = False
+    
+    # Add activation reminder (always, since we can't detect activation state)
+    result['warnings'].append(
+        "One-time setup: Open OBS → Tools → Start Virtual Camera → Stop → Close OBS"
+    )
+    
+    return result
+
 
 class SyphonWebcamOutput:
     def __init__(self, server_name="CanonCamSyphon"):
@@ -151,19 +306,47 @@ class PyVirtualCamOutput:
     def start(self, width, height, fps=30):
         """Start virtual camera output with dedicated delivery thread"""
         if not PYVIRTUALCAM_AVAILABLE:
+            logger.warning("PyVirtualCam not available - cannot start virtual camera")
             print("PyVirtualCam not available - cannot start virtual camera")
             return False
             
         if self.is_running:
+            logger.info("Virtual camera already running.")
             print("Virtual camera already running.")
             return True
+        
+        # Check OBS requirements before attempting to start
+        obs_check = check_obs_requirements()
+        
+        # Log any errors
+        for error in obs_check.get('errors', []):
+            logger.error(f"OBS requirement error: {error}")
+            print(f"ERROR: {error}")
+        
+        # Log warnings
+        for warning in obs_check.get('warnings', []):
+            logger.warning(f"OBS setup note: {warning}")
+            print(f"Note: {warning}")
+        
+        # Log version info
+        if obs_check.get('macos_version'):
+            macos_ver = '.'.join(str(v) for v in obs_check['macos_version'])
+            logger.info(f"macOS version: {macos_ver}")
+        if obs_check.get('obs_version'):
+            logger.info(f"OBS version: {obs_check['obs_version']}")
+        
+        # If requirements not met, return early with helpful message
+        if not obs_check.get('requirements_met', True):
+            logger.error("OBS requirements not met - virtual camera cannot start")
+            print("Virtual camera cannot start: OBS requirements not met")
+            return False
         
         self.width = width
         self.height = height
         self.target_fps = max(24, min(fps, 30))  # Clamp to 24-30 FPS range
         
         try:
-            # On macOS, this requires OBS Virtual Camera to be installed
+            # On macOS, this requires OBS Virtual Camera to be installed and activated once
             self.cam = pyvirtualcam.Camera(width, height, self.target_fps, fmt=pyvirtualcam.PixelFormat.RGB)
             self.is_running = True
             
@@ -176,13 +359,33 @@ class PyVirtualCamOutput:
             )
             self.delivery_thread.start()
             
+            logger.info(f"Virtual camera '{self.name}' started at {width}x{height} @ {self.target_fps}fps")
             print(f"Virtual camera '{self.name}' started at {width}x{height} @ {self.target_fps}fps")
             print(f"Device: {self.cam.device}")
             print(f"Frame buffer: {self.frame_buffer.maxlen} frames for timing smoothness")
             return True
+        except RuntimeError as e:
+            error_msg = str(e)
+            logger.error(f"Failed to start virtual camera: {error_msg}")
+            print(f"Failed to start virtual camera: {error_msg}")
+            
+            # Provide specific guidance based on error
+            if "no output" in error_msg.lower() or "could not find" in error_msg.lower():
+                print("\nTo fix this issue:")
+                print("1. Open OBS Studio")
+                print("2. Go to Tools → Start Virtual Camera")
+                print("3. Click Stop Virtual Camera")
+                print("4. Close OBS completely")
+                print("5. Try again")
+                print("\nThis one-time activation registers the virtual camera with macOS.")
+            
+            self.cam = None
+            self.is_running = False
+            return False
         except Exception as e:
+            logger.error(f"Unexpected error starting virtual camera: {e}")
             print(f"Failed to start virtual camera: {e}")
-            print("On macOS: Install OBS Studio and start 'Tools > Start Virtual Camera'")
+            print("On macOS: Install OBS Studio and run 'Tools > Start Virtual Camera' once")
             self.cam = None
             self.is_running = False
             return False

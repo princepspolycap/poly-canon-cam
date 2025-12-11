@@ -34,13 +34,25 @@ source "$VENV_PATH/bin/activate"
 
 # Step 2: Install py2app if needed
 echo "📦 Ensuring py2app is installed..."
-pip install --quiet --upgrade py2app
+if python - <<'PY' >/dev/null 2>&1
+import py2app
+PY
+then
+    echo "   py2app already available."
+else
+    echo "   Installing py2app (offline installs may fail)..."
+    pip install --quiet --upgrade py2app || {
+        echo "⚠️  py2app install failed (likely offline). Using existing version if available."
+    }
+fi
 
 # Step 3: Create icon
-if [ -f "logo.png" ]; then
+if [ -f "logo.icns" ]; then
+    echo "🎨 Using existing logo.icns"
+elif [ -f "logo.png" ]; then
     echo "🎨 Creating application icon..."
     chmod +x create_icon.sh
-    ./create_icon.sh
+    ./create_icon.sh || echo "⚠️  Icon generation failed; continuing with existing icon."
 else
     echo "⚠️  Warning: logo.png not found, app will use default icon"
 fi
@@ -93,10 +105,36 @@ fi
 
 # Step 8: Remove quarantine attributes (for local testing)
 echo "🔓 Removing quarantine attributes..."
-xattr -cr "$APP_PATH" 2>/dev/null || true
-xattr -cr "$FRAMEWORKS_DIR/EDSDK.framework" 2>/dev/null || true
+# Use find + xattr to handle files properly (xattr -cr not supported on all macOS versions)
+find "$APP_PATH" -type f -exec xattr -c {} \; 2>/dev/null || true
+find "$FRAMEWORKS_DIR" -type f -exec xattr -c {} \; 2>/dev/null || true
 
-# Step 9: Update framework paths in the binary
+# Step 9: Ad-hoc code sign all binaries (REQUIRED for macOS 13+)
+echo "🔏 Ad-hoc signing all binaries for macOS 13+ compatibility..."
+# Sign all .so files first (Python extensions)
+find "$APP_PATH/Contents/Resources" -type f -name "*.so" -exec codesign --force --sign - {} \; 2>/dev/null || true
+# Sign all dylibs
+find "$APP_PATH" -type f -name "*.dylib" -exec codesign --force --sign - {} \; 2>/dev/null || true
+# Sign frameworks from inside out
+find "$APP_PATH" -type d -name "*.framework" | while read fw; do
+    codesign --force --deep --sign - "$fw" 2>/dev/null || true
+done
+# Sign Python framework explicitly
+if [ -d "$FRAMEWORKS_DIR/Python.framework" ]; then
+    codesign --force --deep --sign - "$FRAMEWORKS_DIR/Python.framework" 2>/dev/null || true
+fi
+# Sign EDSDK framework
+if [ -d "$FRAMEWORKS_DIR/EDSDK.framework" ]; then
+    codesign --force --deep --sign - "$FRAMEWORKS_DIR/EDSDK.framework" 2>/dev/null || true
+fi
+# Sign the main executables
+codesign --force --sign - "$APP_PATH/Contents/MacOS/python" 2>/dev/null || true
+codesign --force --sign - "$APP_PATH/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+# Finally sign the whole app bundle
+codesign --force --deep --sign - "$APP_PATH"
+echo "✅ Ad-hoc signing complete"
+
+# Step 10: Update framework paths in the binary
 echo "🔗 Updating framework load paths..."
 BINARY_PATH="$APP_PATH/Contents/MacOS/$APP_NAME"
 if [ -f "$BINARY_PATH" ]; then
@@ -109,16 +147,14 @@ if [ -f "$BINARY_PATH" ]; then
     echo "✅ Framework paths updated"
 fi
 
-# Step 10: Optional code signing (requires Apple Developer ID)
+# Step 11: Optional Developer ID signing (for distribution)
 if [ -n "$APPLE_DEVELOPER_ID" ]; then
-    echo "🔏 Signing application with Apple Developer ID..."
+    echo "🔏 Re-signing application with Apple Developer ID..."
     codesign --force --deep --sign "$APPLE_DEVELOPER_ID" "$APP_PATH"
-    echo "✅ Application signed successfully"
-else
-    echo "ℹ️  Skipping code signing (set APPLE_DEVELOPER_ID to sign)"
+    echo "✅ Application signed with Developer ID"
 fi
 
-# Step 11: Create a DMG for distribution (optional)
+# Step 12: Create a DMG for distribution (optional)
 if [ "$1" == "--dmg" ] || [ "$2" == "--dmg" ]; then
     echo "💿 Creating disk image..."
     DMG_NAME="PolyCanonCam-v1.0.0.dmg"

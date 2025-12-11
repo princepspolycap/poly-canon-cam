@@ -2,6 +2,61 @@
 
 This directory contains everything needed to package Poly Canon Cam as a standalone macOS application.
 
+## Virtual Camera Requirements
+
+Before using the virtual camera output, you must have OBS Studio properly configured:
+
+### OBS Version Requirements
+
+| macOS Version | Required OBS Version | Camera Plugin |
+|--------------|---------------------|---------------|
+| macOS 13+    | OBS 30+             | CMIOExtension |
+| macOS 12     | OBS 26+             | DAL Plugin    |
+
+### One-Time Activation (REQUIRED)
+
+OBS Virtual Camera must be activated once before any application can use it:
+
+1. **Open OBS Studio**
+2. Go to **Tools → Start Virtual Camera**
+3. Click **Stop Virtual Camera**
+4. **Close OBS completely**
+
+This registers the virtual camera with macOS. You only need to do this once.
+
+### Syphon Output (Optional)
+
+Syphon is not bundled in production builds by default. This avoids macOS killing
+the app when the bundled `Syphon.framework` fails code-sign validation or
+framework relocation during packaging.
+
+If you need Syphon:
+
+1. Build the app with Syphon included:
+   ```bash
+   POLYCANON_INCLUDE_SYPHON=1 ./build_app.sh
+   ```
+2. Launch the app with Syphon enabled at runtime:
+   ```bash
+   POLYCANON_ENABLE_SYPHON=1 open "dist/Poly Canon Cam.app"
+   ```
+
+If Syphon still fails to load, leave it disabled and use the virtual camera
+output.
+
+### Troubleshooting Flickering
+
+If the virtual camera output flickers:
+
+1. **Check OBS Version**: Run `defaults read /Applications/OBS.app/Contents/Info.plist CFBundleShortVersionString` - must be 30+ on macOS 13+
+2. **Complete Activation**: Make sure you followed the one-time activation steps above
+3. **Restart After OBS Update**: After updating OBS, repeat the activation steps
+4. **Close OBS**: Virtual camera works best when OBS itself is not running
+
+### Check Your Setup
+
+The app automatically checks OBS requirements at startup and will display errors/warnings in the log.
+
 ## Quick Start
 
 ```bash
@@ -114,6 +169,32 @@ After running `./build_app.sh` we verify the bundle by:
 If all four checks pass, the build is production-ready.
 
 ## Troubleshooting
+
+### Virtual Camera Not Working / Flickering
+
+**Symptom**: Virtual camera output flickers, shows OBS logo intermittently, or fails to start.
+
+**Causes and Fixes**:
+
+1. **OBS Not Installed**
+   ```bash
+   # Install OBS from https://obsproject.com
+   # Then run the one-time activation (see Virtual Camera Requirements above)
+   ```
+
+2. **Wrong OBS Version** (macOS 13+ requires OBS 30+)
+   ```bash
+   # Check your OBS version
+   defaults read /Applications/OBS.app/Contents/Info.plist CFBundleShortVersionString
+   
+   # If less than 30, update from https://obsproject.com
+   ```
+
+3. **One-Time Activation Not Done**
+   - Open OBS → Tools → Start Virtual Camera → Stop → Close OBS
+
+4. **OBS Running While Using Virtual Camera**
+   - Close OBS completely before starting Poly Canon Cam
 
 ### "App is damaged and can't be opened"
 
